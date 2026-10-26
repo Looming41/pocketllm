@@ -33,7 +33,7 @@ def serve_node(host: str, port: int, threads: int | None = None, cache: bool = T
               "cores": p["cpu"].get("physical_cores") or p["cpu"].get("logical_cores"),
               "ram_total": p["ram"]["total_bytes"], "ram_free": p["ram"]["available_bytes"],
               "gpus": [{"name": g.get("name"), "vram_free": g.get("vram_free_bytes")} for g in p["gpus"]]}
-    cmd = [runtime.binary("rpc-server"), "-H", host, "-p", str(port)]
+    cmd = [runtime.binary("ggml-rpc-server"), "-H", host, "-p", str(port)]
     if threads:
         cmd += ["-t", str(threads)]
     if cache:

@@ -28,5 +28,16 @@ llama.cpp CPU 백엔드의 `MUL_MAT_ID`(MoE 행렬곱)에서 **스레드 0이 �
 - 매 실행 전 모델 파일의 페이지 캐시를 비워 콜드 상태에서 시작합니다. 측정은 llama-bench로 16토큰 생성 속도(`-lm mmap --repack 0`, 4스레드)를 잽니다.
 - 재현: `sudo python3 scripts/stream_lab.py --model <moe.gguf> --llama-bin <bin> --drives 1,2,3 --drive-mbps 300 --mem-mib 1536`
 
-## 4. 결과
-(아래 RESULTS 절 참고: `docs/RESULTS.md` R5~R6)
+## 4. 결과 (3회 콜드 실행 평균 ± 표준편차, 드라이브당 300MB/s, RAM 한도 1.5GiB, 3.5GB MoE)
+| 설정 | 드라이브 1개 | 2개 | 3개 |
+|---|---|---|---|
+| 기본 llama.cpp mmap | 0.63 ± 0.07 tok/s (13.0GB 읽음) | 0.58 ± 0.15 (18.4GB) | 0.63 ± 0.09 (21.4GB) |
+| **PocketLLM (프리페치 + 전문가 영역 read-around 끔)** | **4.15 ± 0.07 (6.6배, 5.4GB)** | **7.56 ± 0.36 (12.9배, 5.2GB)** | **7.41 ± 0.35 (11.8배)** |
+
+해석
+- 기본 llama.cpp는 같은 토큰을 만드는 데 **2.5~4배 더 많이 읽습니다**(이웃 전문가 낭비). 그래서 드라이브를 늘려도 빨라지지 않습니다.
+- PocketLLM은 필요한 전문가만 동시에 읽기 때문에 **드라이브 2개까지는 대역폭이 그대로 속도로 바뀝니다**(1.8배). 3개부터는 이 환경에서 CPU(4스레드) 계산이 병목이 되어 포화합니다.
+- 다음 레이어 예측과 핫 전문가 고정은 이 환경에서 오히려 손해였습니다(R6). 실제 모델의 라우팅 편향에서 다시 측정해야 합니다.
+- 독립 비교: TinyGiant가 보고한 M1 16GB 실측(Qwen3-30B-A3B, llama.cpp 1.06 → 2.68 tok/s✳)은 같은 원리입니다. PocketLLM은 이를 llama.cpp 내부 훅(커널 재사용, 분할·다중 드라이브 지원)으로 구현했습니다.
+
+원자료: `docs/results/stream_lab_300mbps_reps.json`, 표 생성: `python3 scripts/lab_report.py docs/results/*.json`

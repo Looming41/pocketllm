@@ -37,4 +37,40 @@ Load test-moe from the UI, run the assistant (offline rules), and stream a chat 
 2. **Stale server:** a leftover llama-server on port 8081 answered the health check. The UI then reported "loaded" while the new process had exited. Fixed: start on a free port, and count a health check only while our process is alive. Regression-tested with a decoy listener on 8081.
 3. **Unified memory double count:** for MoE hybrid on Apple Silicon, the planner counted the GPU and CPU shares as separate memory. Fixed and covered by a unit test.
 
+
+## Expert streaming engine (ggml-pocket): emulated low-RAM laptop with USB drives
+
+Setup (environment E0, emulation): random-weight MoE `test-bigmoe-Q4_K_M.gguf`, qwen3moe architecture, 24 layers, 64 experts with top-8 routing, 5.7B params, 3.52 GB, of which 2.93 GB are routed experts. A cgroup memory limit of **1.5 GiB** (page cache included) plays the low-RAM laptop. Each "USB drive" is an ext4 loop device (direct I/O) throttled with blkio to **300 MB/s**. Every run starts with a cold cache, then llama-bench measures 16 generated tokens (`-lm mmap --repack 0 -t 4`). Results are mean ± sd over 3 cold runs. Script: `scripts/stream_lab.py`, raw data: `docs/results/stream_lab_300mbps_reps.json`.
+
+### R5: decode speed vs number of drives
+| config | 1 drive | 2 drives (striped) | 3 drives (striped) |
+|---|---|---|---|
+| llama.cpp mmap (baseline) | 0.63 ± 0.07 tok/s (13.0 GB read) | 0.58 ± 0.15 (18.4 GB) | 0.63 ± 0.09 (21.4 GB) |
+| PocketLLM expert prefetch | 3.39 ± 0.01 (6.5 GB) ×5.4 | 4.32 ± 0.61 (6.5 GB) ×7.4 | 4.73 ± 0.59 (6.1 GB) ×7.5 |
+| **PocketLLM prefetch + no read-around on experts (default)** | **4.15 ± 0.07 (5.4 GB) ×6.6** | **7.56 ± 0.36 (5.2 GB) ×12.9** | **7.41 ± 0.35 (5.2 GB) ×11.8** |
+| same + 8 pread I/O threads | 2.96 ± 0.07 (5.7 GB) | 4.58 ± 0.09 (5.5 GB) | 4.31 ± 0.43 (5.5 GB) |
+
+Reading:
+* **Read amplification is the main loss in stock llama.cpp.** Fault read-around (llama.cpp sets `POSIX_FADV_SEQUENTIAL`) pulls in neighbouring, unused experts. The baseline read 13–21 GB, against about 5 GB for PocketLLM, for the same tokens.
+* **The second drive helps; a third did not here** (×1.8 from one to two drives, then flat). With 3 drives we are no longer I/O-bound in this setup: the 4-thread CPU compute and the remaining synchronous faults dominate. The baseline does not scale with drives at all.
+* Turning read-around off **only for expert tensors** matters. Turning it off for the whole mapping was slower than prefetch alone, because evicted dense weights were then re-read in 4 KB faults (first exploratory run, `docs/results/stream_lab_300mbps.json`).
+* The pread I/O-thread mode is worse than kernel read-ahead hints on Linux. It remains available for macOS, where `F_RDADVISE` is untested.
+
+### R6: features that did *not* help in this lab (single runs, `docs/results/stream_lab_300mbps.json`)
+| config (1 drive) | tok/s |
+|---|---|
+| expert prefetch | 3.36 |
+| + next-layer prediction (79.6% hit rate) | 2.75 |
+| + pin 384 MiB of hot experts (calibrated) | 2.42 |
+
+When bandwidth is the bottleneck, every wrong prediction wastes reads, and pinned memory shrinks the page cache available for everything else. The routing of a random-weight model is also unlike that of a trained model (real routers are skewed, which favours pinning). Both features are therefore **off by default** and must be re-measured on real models.
+
+### R7: correctness
+* `pocketllm stripe` output (3 split files on 3 "drives", symlinked) gives **token-identical** greedy output to the original GGUF in llama-server.
+* The engine only changes *when* data is read, never the computation. Its outputs are the same as stock llama.cpp.
+* Cluster mode: two local `ggml-rpc-server` nodes (`-ts 0.5,0.5`; node RSS 250 MB and 307 MB) gave greedy output **token-identical** to single-node inference.
+
+### Caveats
+Loop devices have almost no access latency, unlike real USB flash, and real models route differently. These are **lab numbers**: the next step is the same measurement on a real laptop with real USB drives and a real MoE model (Qwen3-30B-A3B, Llama 4 Scout), using `scripts/usb_vs_ssd.sh` and `pocketllm tune`.
+
 ## Environment E1: target laptop. **TODO** (run `scripts/check_laptop.sh`, then `docs/TEST_PLAN_BIG_MODEL_KO.md`)

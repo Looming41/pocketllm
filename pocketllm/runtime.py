@@ -95,6 +95,11 @@ class LlamaServer:
         log.write(f"\n=== {time.strftime('%H:%M:%S')} {' '.join(cmd)}\n")
         log.flush()
         self.env = dict(env or {})
+        # key file (0600) so command-line users and scripts can call the server too
+        key_path = os.path.join(data_dir(), "llama-server.key")
+        fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as kf:
+            kf.write(self.api_key)
         # the key goes through the environment, not argv, so other local users cannot read it from `ps`
         self.proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT,
                                      env=dict(os.environ, LLAMA_API_KEY=self.api_key, **self.env))

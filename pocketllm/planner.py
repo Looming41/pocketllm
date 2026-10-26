@@ -292,6 +292,12 @@ def build_args(spec: ModelSpec, p: Plan, b: Budget) -> list:
     # catalog entries are not on disk yet: llama.cpp can fetch them with -hf <repo>:<quant>
     src = ["-hf", spec.path] if spec.source == "estimate" else ["-m", spec.path or spec.name]
     args = [*src, "-c", str(p.ctx), "-t", str(b.threads)]
+    if p.strategy == "expert_stream" and b.unified:
+        # Apple Silicon: until Metal + mmap'd experts larger than RAM is validated on a Mac,
+        # stream on the CPU path (the engine hooks the CPU MoE kernel)
+        p.n_gpu_layers, p.n_cpu_moe = 0, 0
+        if "Metal hybrid (attention on GPU, experts streamed) not validated yet: CPU path" not in p.notes:
+            p.notes.append("Metal hybrid (attention on GPU, experts streamed) not validated yet: CPU path")
     if p.n_gpu_layers:
         args += ["-ngl", str(p.n_gpu_layers)]
     else:

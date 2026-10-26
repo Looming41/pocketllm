@@ -44,6 +44,12 @@ class TestPlanner(unittest.TestCase):
         self.assertIn("-lm", p.args)
         self.assertEqual(p.args[p.args.index("-lm") + 1], "mmap")
 
+    def test_streaming_on_apple_uses_cpu_path(self):
+        p = planner.plan(scout(), planner.budget_from_profile(profile(16, gpu_gb=11, unified=True), disk_gbps=2.0))
+        self.assertEqual(p.strategy, "expert_stream")
+        self.assertEqual(p.args[p.args.index("-ngl") + 1], "0")
+        self.assertNotIn("-ncmoe", p.args)
+
     def test_dense_model_over_ram_pages_without_streaming_engine(self):
         s = next(s for s in catalog.specs(["llama-3.3-70b-instruct"]) if s.name.endswith("Q4_K_M"))
         p = planner.plan(s, planner.budget_from_profile(profile(16), disk_gbps=1.0))

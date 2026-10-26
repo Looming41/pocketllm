@@ -15,7 +15,14 @@ PocketLLM combines ideas from roughly 50 open-source projects that run large mod
 
 ## Results (measured, emulated hardware)
 
-RESULTS_TABLE_PLACEHOLDER
+Emulated "16 GB-class laptop" (1.5 GiB RAM limit for a 3.5 GB MoE, 5.7B params, 64 experts top-8) with "USB drives" throttled to 300 MB/s each. Decode speed, mean ± sd of 3 cold runs (`docs/RESULTS.md` R5):
+
+| | 1 drive | 2 drives | 3 drives |
+|---|---|---|---|
+| stock llama.cpp (mmap) | 0.63 ± 0.07 tok/s · 13.0 GB read | 0.58 ± 0.15 · 18.4 GB | 0.63 ± 0.09 · 21.4 GB |
+| **PocketLLM engine** | **4.15 ± 0.07 tok/s (×6.6)** · 5.4 GB | **7.56 ± 0.36 (×12.9)** · 5.2 GB | **7.41 ± 0.35 (×11.8)** · 5.2 GB |
+
+The speedup has two sources. First, stock mmap read-around pulls in neighbouring *unused* experts, roughly 3× read amplification. Second, PocketLLM issues all routed-expert reads at once, so they overlap and spread across drives. Outputs are token-identical, because the engine changes only *when* weights are read.
 
 ## Quick start
 

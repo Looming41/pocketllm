@@ -1,0 +1,184 @@
+{
+  "model": "test-bigmoe-Q4_K_M.gguf",
+  "model_gb": 3.52,
+  "mem_mib": 1536,
+  "drive_mbps": 300,
+  "n_gen": 16,
+  "threads": 4,
+  "runs": [
+    {
+      "ok": true,
+      "wall_s": 50.3,
+      "tg_tok_s": 0.507,
+      "stddev": 0.0,
+      "drive_read_gb": 14.83,
+      "drives": 1,
+      "config": "llama.cpp mmap (baseline)"
+    },
+    {
+      "ok": true,
+      "wall_s": 29.0,
+      "tg_tok_s": 1.263,
+      "stddev": 0.0,
+      "drive_read_gb": 5.25,
+      "drives": 1,
+      "config": "baseline, read-around off"
+    },
+    {
+      "ok": true,
+      "wall_s": 22.2,
+      "pocket": "pocket: tokens=16 layers=24 maps=1 advise_calls=9408 advise_gb=5.96 pred_hit=0.0% (0/0) pinned_mib=0",
+      "tg_tok_s": 3.355,
+      "stddev": 0.0,
+      "drive_read_gb": 6.47,
+      "drives": 1,
+      "config": "expert prefetch"
+    },
+    {
+      "ok": true,
+      "wall_s": 21.6,
+      "pocket": "pocket: tokens=16 layers=24 maps=1 advise_calls=9408 advise_gb=5.96 pred_hit=0.0% (0/0) pinned_mib=0",
+      "tg_tok_s": 3.004,
+      "stddev": 0.0,
+      "drive_read_gb": 5.25,
+      "drives": 1,
+      "config": "expert prefetch, read-around off"
+    },
+    {
+      "ok": true,
+      "wall_s": 21.6,
+      "pocket": "pocket: tokens=16 layers=24 maps=1 advise_calls=17136 advise_gb=10.86 pred_hit=79.6% (2050/2576) pinned_mib=0",
+      "tg_tok_s": 2.75,
+      "stddev": 0.0,
+      "drive_read_gb": 5.36,
+      "drives": 1,
+      "config": "prefetch + next-layer prediction, read-around off"
+    },
+    {
+      "ok": true,
+      "wall_s": 22.2,
+      "pocket": "pocket: tokens=16 layers=24 maps=1 advise_calls=2733 advise_gb=1.74 pred_hit=0.0% (0/0) pinned_mib=382",
+      "tg_tok_s": 2.419,
+      "stddev": 0.0,
+      "drive_read_gb": 5.07,
+      "drives": 1,
+      "config": "prefetch + pin 384 MiB (calibrated), read-around off"
+    },
+    {
+      "ok": true,
+      "wall_s": 66.2,
+      "tg_tok_s": 0.324,
+      "stddev": 0.0,
+      "drive_read_gb": 16.2,
+      "drives": 2,
+      "config": "llama.cpp mmap (baseline)"
+    },
+    {
+      "ok": true,
+      "wall_s": 32.1,
+      "tg_tok_s": 1.097,
+      "stddev": 0.0,
+      "drive_read_gb": 5.26,
+      "drives": 2,
+      "config": "baseline, read-around off"
+    },
+    {
+      "ok": true,
+      "wall_s": 19.6,
+      "pocket": "pocket: tokens=16 layers=24 maps=2 advise_calls=9408 advise_gb=5.96 pred_hit=0.0% (0/0) pinned_mib=0",
+      "tg_tok_s": 4.038,
+      "stddev": 0.0,
+      "drive_read_gb": 6.57,
+      "drives": 2,
+      "config": "expert prefetch"
+    },
+    {
+      "ok": true,
+      "wall_s": 21.7,
+      "pocket": "pocket: tokens=16 layers=24 maps=2 advise_calls=9408 advise_gb=5.96 pred_hit=0.0% (0/0) pinned_mib=0",
+      "tg_tok_s": 2.93,
+      "stddev": 0.0,
+      "drive_read_gb": 5.27,
+      "drives": 2,
+      "config": "expert prefetch, read-around off"
+    },
+    {
+      "ok": true,
+      "wall_s": 21.6,
+      "pocket": "pocket: tokens=16 layers=24 maps=2 advise_calls=17136 advise_gb=10.86 pred_hit=79.6% (2050/2576) pinned_mib=0",
+      "tg_tok_s": 2.804,
+      "stddev": 0.0,
+      "drive_read_gb": 5.3,
+      "drives": 2,
+      "config": "prefetch + next-layer prediction, read-around off"
+    },
+    {
+      "ok": true,
+      "wall_s": 24.9,
+      "pocket": "pocket: tokens=16 layers=24 maps=2 advise_calls=2184 advise_gb=1.39 pred_hit=0.0% (0/0) pinned_mib=383",
+      "tg_tok_s": 2.046,
+      "stddev": 0.0,
+      "drive_read_gb": 5.1,
+      "drives": 2,
+      "config": "prefetch + pin 384 MiB (calibrated), read-around off"
+    },
+    {
+      "ok": true,
+      "wall_s": 35.6,
+      "tg_tok_s": 0.866,
+      "stddev": 0.0,
+      "drive_read_gb": 15.26,
+      "drives": 3,
+      "config": "llama.cpp mmap (baseline)"
+    },
+    {
+      "ok": true,
+      "wall_s": 32.1,
+      "tg_tok_s": 1.13,
+      "stddev": 0.0,
+      "drive_read_gb": 5.25,
+      "drives": 3,
+      "config": "baseline, read-around off"
+    },
+    {
+      "ok": true,
+      "wall_s": 18.7,
+      "pocket": "pocket: tokens=16 layers=24 maps=3 advise_calls=9408 advise_gb=5.96 pred_hit=0.0% (0/0) pinned_mib=0",
+      "tg_tok_s": 4.443,
+      "stddev": 0.0,
+      "drive_read_gb": 6.31,
+      "drives": 3,
+      "config": "expert prefetch"
+    },
+    {
+      "ok": true,
+      "wall_s": 22.0,
+      "pocket": "pocket: tokens=16 layers=24 maps=3 advise_calls=9408 advise_gb=5.96 pred_hit=0.0% (0/0) pinned_mib=0",
+      "tg_tok_s": 3.188,
+      "stddev": 0.0,
+      "drive_read_gb": 5.26,
+      "drives": 3,
+      "config": "expert prefetch, read-around off"
+    },
+    {
+      "ok": true,
+      "wall_s": 21.1,
+      "pocket": "pocket: tokens=16 layers=24 maps=3 advise_calls=17136 advise_gb=10.86 pred_hit=79.6% (2050/2576) pinned_mib=0",
+      "tg_tok_s": 3.098,
+      "stddev": 0.0,
+      "drive_read_gb": 5.38,
+      "drives": 3,
+      "config": "prefetch + next-layer prediction, read-around off"
+    },
+    {
+      "ok": true,
+      "wall_s": 23.5,
+      "pocket": "pocket: tokens=16 layers=24 maps=3 advise_calls=2139 advise_gb=1.36 pred_hit=0.0% (0/0) pinned_mib=383",
+      "tg_tok_s": 2.328,
+      "stddev": 0.0,
+      "drive_read_gb": 5.08,
+      "drives": 3,
+      "config": "prefetch + pin 384 MiB (calibrated), read-around off"
+    }
+  ]
+}

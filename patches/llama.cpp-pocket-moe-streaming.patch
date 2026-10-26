@@ -1,9 +1,9 @@
 diff --git a/ggml/include/ggml-pocket.h b/ggml/include/ggml-pocket.h
 new file mode 100644
-index 0000000..4ae495b
+index 0000000..32ac0d4
 --- /dev/null
 +++ b/ggml/include/ggml-pocket.h
-@@ -0,0 +1,42 @@
+@@ -0,0 +1,44 @@
 +// PocketLLM expert streaming for memory-mapped MoE models on the CPU.
 +//
 +// When a MoE model is larger than RAM, llama.cpp memory-maps it and the OS
@@ -20,12 +20,14 @@ index 0000000..4ae495b
 +//                         split files live on different drives is read in parallel
 +//
 +// Enabled with POCKET_MOE=1. Other knobs (environment):
-+//   POCKET_MOE_PREDICT=0|1   next-layer prediction (default 1)
++//   POCKET_MOE_PREDICT=0|1   next-layer prediction (default 0: costs bandwidth when I/O-bound)
 +//   POCKET_MOE_PIN_MIB=N     pin up to N MiB of hot experts (default 0 = off)
 +//   POCKET_MOE_STATS=path    write routing statistics at exit (and read them at start)
 +//   POCKET_MOE_VERBOSE=1     print a summary at exit
-+//   POCKET_MOE_NORA=1        disable fault read-around on model mappings (MADV_RANDOM); works
-+//                            with or without POCKET_MOE
++//   POCKET_MOE_IO_THREADS=N  read ahead with N pread() worker threads instead of
++//                            fadvise/F_RDADVISE hints (portable fallback; default 0)
++//   POCKET_MOE_NORA=1        disable fault read-around on routed-expert tensors only (MADV_RANDOM)
++//   POCKET_MOE_NORA=2        disable it on the whole mapping (diagnostic; works without POCKET_MOE)
 +#pragma once
 +
 +#include "ggml.h"
@@ -85,10 +87,10 @@ index 53d39d2..7232079 100644
      // reset current_chunk
 diff --git a/ggml/src/ggml-pocket.c b/ggml/src/ggml-pocket.c
 new file mode 100644
-index 0000000..7f39255
+index 0000000..31a5508
 --- /dev/null
 +++ b/ggml/src/ggml-pocket.c
-@@ -0,0 +1,442 @@
+@@ -0,0 +1,504 @@
 +// PocketLLM expert streaming - see ggml/include/ggml-pocket.h for the design.
 +#define _GNU_SOURCE
 +#include "ggml-pocket.h"
@@ -138,7 +140,7 @@ index 0000000..7f39255
 +
 +static struct {
 +    int    init;
-+    int    enabled, predict, verbose, no_readaround;
++    int    enabled, predict, verbose, no_readaround, io_threads;
 +    size_t pin_bytes;
 +    char   stats_path[1024];
 +
@@ -166,13 +168,16 @@ index 0000000..7f39255
 +    const char * e = getenv("POCKET_MOE");
 +    pk.enabled = e && atoi(e) != 0;
 +    e = getenv("POCKET_MOE_NORA");
-+    pk.no_readaround = e && atoi(e) != 0;
++    pk.no_readaround = e ? atoi(e) : 0;
 +    e = getenv("POCKET_MOE_PREDICT");
-+    pk.predict = e ? atoi(e) != 0 : 1;
++    pk.predict = e ? atoi(e) != 0 : 0;  // off by default: wrong guesses cost bandwidth (measured)
 +    e = getenv("POCKET_MOE_VERBOSE");
 +    pk.verbose = e && atoi(e) != 0;
 +    e = getenv("POCKET_MOE_PIN_MIB");
 +    pk.pin_bytes = e ? (size_t) atoll(e) << 20 : 0;
++    e = getenv("POCKET_MOE_IO_THREADS");
++    pk.io_threads = e ? atoi(e) : 0;
++    if (pk.io_threads > 32) pk.io_threads = 32;
 +    e = getenv("POCKET_MOE_STATS");
 +    if (e) {
 +        snprintf(pk.stats_path, sizeof(pk.stats_path), "%s", e);
@@ -192,8 +197,8 @@ index 0000000..7f39255
 +    if (!addr || fd < 0) {
 +        return;
 +    }
-+    if (pk.no_readaround) {
-+        // MoE access is sparse: fault read-around pulls in neighbouring (unused) experts
++    if (pk.no_readaround == 2) {
++        // whole mapping: no fault read-around anywhere (also hurts dense weights - diagnostic only)
 +        madvise((void *) addr, size, MADV_RANDOM);
 +    }
 +    if (!pk.enabled) {
@@ -219,6 +224,52 @@ index 0000000..7f39255
 +    return -1;
 +}
 +
++// ---- optional I/O worker pool: blocking pread() into a scratch buffer fills the page cache.
++// Portable fallback for systems where read-ahead advice is weak (POCKET_MOE_IO_THREADS=N).
++#define PK_QCAP 4096
++static struct {
++    pthread_mutex_t mu;
++    pthread_cond_t  cv;
++    struct { int fd; off_t off; size_t n; } q[PK_QCAP];
++    int head, tail, started;
++} io = { .mu = PTHREAD_MUTEX_INITIALIZER, .cv = PTHREAD_COND_INITIALIZER };
++
++static void * pk_io_worker(void * arg) {
++    (void) arg;
++    size_t cap = 4u << 20;
++    char * buf = malloc(cap);
++    for (;;) {
++        pthread_mutex_lock(&io.mu);
++        while (io.head == io.tail) pthread_cond_wait(&io.cv, &io.mu);
++        int fd = io.q[io.tail].fd; off_t off = io.q[io.tail].off; size_t n = io.q[io.tail].n;
++        io.tail = (io.tail + 1) % PK_QCAP;
++        pthread_mutex_unlock(&io.mu);
++        while (n > 0) {
++            ssize_t r = pread(fd, buf, n < cap ? n : cap, off);
++            if (r <= 0) break;
++            off += r; n -= (size_t) r;
++        }
++    }
++    return NULL;
++}
++
++static int pk_io_submit(int fd, off_t off, size_t n) {
++    if (!io.started) {
++        io.started = 1;
++        for (int i = 0; i < pk.io_threads; i++) {
++            pthread_t t;
++            if (pthread_create(&t, NULL, pk_io_worker, NULL) == 0) pthread_detach(t);
++        }
++    }
++    pthread_mutex_lock(&io.mu);
++    int next = (io.head + 1) % PK_QCAP;
++    int ok = next != io.tail;   // drop the request if the queue is full: it is only a hint
++    if (ok) { io.q[io.head].fd = fd; io.q[io.head].off = off; io.q[io.head].n = n; io.head = next; }
++    pthread_cond_signal(&io.cv);
++    pthread_mutex_unlock(&io.mu);
++    return ok;
++}
++
 +// async read-ahead of [p, p + n) from the file behind mapping m
 +static void pk_advise(int m, const char * p, size_t n) {
 +    if (m < 0 || n == 0) {
@@ -226,6 +277,12 @@ index 0000000..7f39255
 +    }
 +    const struct pk_map * mp = &pk.maps[m];
 +    off_t off = (off_t) (p - mp->base);
++    if (pk.io_threads > 0) {
++        pk_io_submit(mp->fd, off, n);
++        pk.advise_calls++;
++        pk.advise_bytes += n;
++        return;
++    }
 +#if defined(__APPLE__)
 +    struct radvisory ra = { .ra_offset = off, .ra_count = (int) (n > INT32_MAX ? INT32_MAX : n) };
 +    fcntl(mp->fd, F_RDADVISE, &ra);
@@ -439,6 +496,13 @@ index 0000000..7f39255
 +        L->data[kind] = (const char *) w->data;
 +        L->nb2[kind]  = w->nb[2];
 +        L->map[kind]  = pk_find_map(w->data);
++        if (pk.no_readaround == 1 && L->map[kind] >= 0) {
++            // expert access is sparse: stop fault read-around from pulling in neighbouring
++            // (unused) experts, but keep normal read-ahead for the dense weights
++            long ps = sysconf(_SC_PAGESIZE);
++            uintptr_t b = (uintptr_t) w->data & ~(uintptr_t) (ps - 1);
++            madvise((void *) b, ggml_nbytes(w) + ((uintptr_t) w->data - b), MADV_RANDOM);
++        }
 +    }
 +    if (l > pk.max_layer) pk.max_layer = l;
 +

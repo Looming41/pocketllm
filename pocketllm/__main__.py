@@ -62,6 +62,8 @@ def cmd_plan(a):
                 print(f"{'':50}- {n}")
             if pl.args:
                 print(f"{'':50}llama-server {' '.join(pl.args)}")
+    for x in core.INCOMPLETE:
+        print(f"{x['model'][:48]:48} plug in the drive(s) holding: {', '.join(x['missing_parts'])}")
     print("\nest tok/s is an upper bound from a bandwidth model, not a measurement. Run `tune` to measure.")
 
 
@@ -117,7 +119,8 @@ def cmd_cluster(a):
     if a.run:
         srv = runtime.LlamaServer(port=a.llama_port)
         ok = srv.start(args)
-        print("running at " + srv.url if ok else "failed to start, see " + srv.log_path)
+        print(f"running at {srv.url}  (API key in {os.path.join(runtime.data_dir(), 'llama-server.key')})"
+              if ok else "failed to start, see " + srv.log_path)
         if ok:
             try:
                 srv.proc.wait()

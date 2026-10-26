@@ -120,6 +120,9 @@ async function refresh(){
   state = await api("/api/state");
   renderHW(state.hardware);
   renderPlans(state.plans);
+  if (state.incomplete && state.incomplete.length)
+    $("plans").insertAdjacentHTML("beforeend", state.incomplete.map(x =>
+      `<tr><td>${esc(x.model)}</td><td></td><td class="warn">plug in drives</td><td colspan="3">missing parts: ${esc(x.missing_parts.join(", "))}</td></tr>`).join(""));
 }
 async function load(path){
   $("runinfo").textContent = "loading model…";

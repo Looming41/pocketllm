@@ -98,7 +98,7 @@ def make_handler(st: State):
                 p = st.get_profile(refresh="refresh" in self.path)
                 ranked = core.recommendations(p)
                 self._json({"hardware": core.hardware_summary(p), "plans": plan_rows(ranked),
-                            "models_dir": runtime.models_dir()})
+                            "models_dir": runtime.models_dir(), "incomplete": core.INCOMPLETE})
             elif self.path == "/api/status":
                 drive_ok = os.path.isdir(runtime.models_dir())
                 if st.loaded and not all(os.path.exists(x) for x in st.loaded["files"]):

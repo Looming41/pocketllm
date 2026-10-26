@@ -242,3 +242,33 @@ class TestThermal(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(os.path.exists(TEST_MOE), "test models not generated")
+class TestDrives(unittest.TestCase):
+    def test_parts_found_across_volumes_and_missing_reported(self):
+        from pocketllm import core, runtime
+        d = tempfile.mkdtemp()
+        vols = [os.path.join(d, f"vol{i}", "PocketLLM", "models") for i in range(3)]
+        old = {k: os.environ.get(k) for k in ("POCKETLLM_MODELS", "POCKETLLM_EXTRA_DRIVES", "POCKETLLM_DATA")}
+        try:
+            stripe.stripe(TEST_MOE, vols, os.path.join(d, "ignored"), progress=lambda *_: None)
+            os.environ["POCKETLLM_MODELS"] = vols[0]
+            os.environ["POCKETLLM_EXTRA_DRIVES"] = os.pathsep.join(os.path.join(d, f"vol{i}") for i in (1, 2))
+            os.environ["POCKETLLM_DATA"] = os.path.join(d, "data")
+            specs = core.local_specs()
+            self.assertEqual(len(specs), 1)
+            self.assertIn(os.path.join(d, "data", "links"), specs[0].path)
+            self.assertEqual(core.INCOMPLETE, [])
+            # unplug the third drive
+            os.environ["POCKETLLM_EXTRA_DRIVES"] = os.path.join(d, "vol1")
+            self.assertEqual(core.local_specs(), [])
+            self.assertEqual(len(core.INCOMPLETE), 1)
+            self.assertTrue(core.INCOMPLETE[0]["missing_parts"][0].endswith("-00003-of-00003.gguf"))
+        finally:
+            for k, v in old.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+            shutil.rmtree(d)

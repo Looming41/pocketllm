@@ -19,14 +19,23 @@ def network_online(timeout=1.5) -> bool:
     return False
 
 
+INCOMPLETE = []   # split models whose other parts are on drives that are not plugged in
+
+
 def local_specs(models_root=None) -> list:
+    from . import drives
     specs = []
+    INCOMPLETE.clear()
     for path in gguf.find_models(models_root or runtime.models_dir()):
+        r = drives.resolve(path)   # parts may be striped over several USB drives
+        if r["path"] is None:
+            INCOMPLETE.append({"model": os.path.basename(path), "missing_parts": r["missing"]})
+            continue
         try:
-            specs.append(planner.ModelSpec.from_gguf(gguf.load(path), path))
-        except (ValueError, OSError) as e:
-            specs.append(e)
-    return [s for s in specs if isinstance(s, planner.ModelSpec)]
+            specs.append(planner.ModelSpec.from_gguf(gguf.load(r["path"]), r["path"]))
+        except (ValueError, OSError):
+            continue
+    return specs
 
 
 def hardware_summary(p: dict) -> dict:
