@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PocketLLM</title>
+<style>
+:root{--bg:#f6f7f9;--panel:#fff;--ink:#16181d;--muted:#5d6472;--line:#e3e6eb;--accent:#2f5bea;--ok:#147a4a;--warn:#a15c00;--bad:#b42318;--chip:#eef1f6}
+@media (prefers-color-scheme:dark){:root{--bg:#0f1115;--panel:#171a21;--ink:#e8eaee;--muted:#9aa2b1;--line:#2a2f3a;--accent:#7c9cff;--ok:#4cc38a;--warn:#f0a541;--bad:#ff6b5e;--chip:#222733}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
+header{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between;padding:14px 20px;border-bottom:1px solid var(--line);background:var(--panel)}
+h1{font-size:18px;margin:0}h2{font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:0 0 10px}
+.badges{display:flex;gap:8px;flex-wrap:wrap}.badge{padding:3px 10px;border-radius:999px;background:var(--chip);font-size:12px;font-weight:600}
+.ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}
+.notice{margin:12px 20px 0;padding:10px 14px;border:1px solid var(--line);border-left:3px solid var(--accent);background:var(--panel);border-radius:6px;color:var(--muted);font-size:13px}
+main{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.2fr);gap:16px;padding:16px 20px}
+@media (max-width:900px){main{grid-template-columns:1fr;padding:12px 16px}}
+section{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px;margin-bottom:16px}
+dl{display:grid;grid-template-columns:110px 1fr;gap:4px 10px;margin:0}dt{color:var(--muted)}dd{margin:0;overflow-wrap:anywhere}
+table{width:100%;border-collapse:collapse;font-size:12.5px}th,td{text-align:left;padding:6px 6px;border-bottom:1px solid var(--line);vertical-align:top}
+th{color:var(--muted);font-weight:600}td.num{text-align:right;font-variant-numeric:tabular-nums}
+.tablewrap{overflow-x:auto}
+button{font:inherit;padding:6px 12px;border-radius:6px;border:1px solid var(--line);background:var(--chip);color:var(--ink);cursor:pointer}
+button.primary{background:var(--accent);color:#fff;border-color:var(--accent)}button:disabled{opacity:.5;cursor:default}
+input[type=text],textarea{font:inherit;width:100%;padding:8px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink)}
+.row{display:flex;gap:8px;align-items:center}.row>input{flex:1}
+#chat{height:340px;overflow-y:auto;border:1px solid var(--line);border-radius:6px;padding:10px;background:var(--bg)}
+.msg{margin:0 0 10px;white-space:pre-wrap}.msg b{display:block;font-size:11px;color:var(--muted);text-transform:uppercase}
+.metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin:10px 0}
+.metric{background:var(--chip);border-radius:6px;padding:8px}.metric span{display:block;font-size:11px;color:var(--muted)}.metric strong{font-size:17px;font-variant-numeric:tabular-nums}
+.small{font-size:12px;color:var(--muted)}pre{white-space:pre-wrap;font-size:12px;background:var(--bg);padding:8px;border-radius:6px;max-height:220px;overflow:auto}
+label.toggle{display:flex;gap:6px;align-items:center;font-size:12px;color:var(--muted);margin-top:6px}
+</style>
+</head>
+<body>
+<header>
+  <h1>PocketLLM</h1>
+  <div class="badges">
+    <span class="badge" id="b-drive">drive: …</span>
+    <span class="badge" id="b-net">network: …</span>
+    <span class="badge" id="b-model">model: none</span>
+  </div>
+</header>
+<div class="notice">Prototype. The USB drive carries the software and model files; <strong>all inference runs on this computer's own CPU/GPU and memory</strong>. Speeds marked "≤" are upper-bound estimates; numbers from the benchmark are measured.</div>
+<main>
+  <div>
+    <section><h2>This computer</h2><dl id="hw"><dt>loading</dt><dd>profiling hardware…</dd></dl></section>
+    <section>
+      <h2>Setup assistant</h2>
+      <div class="row"><input type="text" id="goal" placeholder="e.g. biggest model that still answers in real time, offline"><button class="primary" id="ask">Plan</button></div>
+      <label class="toggle"><input type="checkbox" id="useMeta" checked> Use Meta Model API (cloud) to interpret the goal. Offline rules are used automatically when unavailable.</label>
+      <p class="small" id="constraints"></p>
+    </section>
+    <section>
+      <h2>Models: will they run here?</h2>
+      <div class="tablewrap"><table><thead><tr><th>Model</th><th class="num">Size</th><th>Verdict</th><th>Placement</th><th class="num">tok/s ≤</th><th></th></tr></thead><tbody id="plans"></tbody></table></div>
+      <p class="small">Local files are measured from their GGUF headers; catalog rows are estimates for models not on the drive yet.</p>
+    </section>
+  </div>
+  <div>
+    <section>
+      <h2>Chat (local)</h2>
+      <div class="metrics">
+        <div class="metric"><span>first token</span><strong id="m-ttft">–</strong></div>
+        <div class="metric"><span>generation</span><strong id="m-tps">–</strong></div>
+        <div class="metric"><span>prompt</span><strong id="m-pps">–</strong></div>
+        <div class="metric"><span>runtime RAM</span><strong id="m-rss">–</strong></div>
+      </div>
+      <div id="chat"></div>
+      <div class="row" style="margin-top:8px"><input type="text" id="prompt" placeholder="Ask the local model…"><button class="primary" id="send">Send</button></div>
+      <p class="small" id="runinfo"></p>
+    </section>
+    <section>
+      <h2>Auto-tune (measured)</h2>
+      <p class="small">Runs llama-bench on the loaded model: llama.cpp defaults vs. a small sweep (threads, flash-attention, GPU/MoE split).</p>
+      <button id="tune" disabled>Benchmark loaded model</button>
+      <div class="tablewrap" id="tuneTable"></div>
+      <pre id="tuneLog" hidden></pre>
+    </section>
+  </div>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const V = {fits:["runs","ok"], slow:["slow","warn"], impractical:["impractical","bad"], does_not_fit:["won't fit","bad"]};
+let state = null, loadedPath = null, history = [];
+
+async function api(path, body){
+  const r = await fetch(path, body ? {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)} : {});
+  return r.json();
+}
+function renderHW(h){
+  const g = h.gpus.length ? h.gpus.map(x => `${esc(x.name)} · ${x.vram_gb} GB${x.unified ? " (unified)" : ""}`).join("<br>") : "none detected (CPU inference)";
+  const d = h.drive;
+  $("hw").innerHTML = `
+    <dt>OS</dt><dd>${esc(h.os)}</dd>
+    <dt>CPU</dt><dd>${esc(h.cpu)} · ${h.cores} cores</dd>
+    <dt>RAM</dt><dd>${h.ram_gb} GB (${h.ram_free_gb} GB free)</dd>
+    <dt>GPU</dt><dd>${g}</dd>
+    <dt>Model drive</dt><dd>${esc(d.path)}<br>${d.usb ? "USB" : d.usb === false ? "internal disk" : "bus unknown"} · ${esc(d.fs)} · ${d.free_gb} GB free · read ${d.read_gbps ?? "?"} GB/s</dd>
+    ${d.warning ? `<dt class="warn">Warning</dt><dd class="warn">${esc(d.warning)}</dd>` : ""}`;
+}
+function renderPlans(rows){
+  $("plans").innerHTML = rows.map(r => {
+    const [label, cls] = V[r.verdict];
+    const where = r.strategy.replace("_", " ") + (r.paged_gb ? ` · ${r.paged_gb} GB paged from drive` : "") + (r.n_cpu_moe ? ` · experts of ${r.n_cpu_moe} layers on CPU` : "");
+    const btn = r.source === "gguf" ? `<button data-path="${esc(r.path)}" ${r.verdict === "does_not_fit" ? "disabled" : ""}>Load</button>` : `<span class="small">not on drive</span>`;
+    return `<tr><td>${esc(r.model)}${r.moe ? ' <span class="small">MoE</span>' : ""}</td><td class="num">${r.size_gb} GB</td>
+      <td class="${cls}">${label}</td><td>${esc(where)}</td><td class="num">${r.est_tok_s_upper ?? "–"}</td><td>${btn}</td></tr>`;
+  }).join("");
+  document.querySelectorAll("#plans button[data-path]").forEach(b => b.onclick = () => load(b.dataset.path));
+}
+async function refresh(){
+  state = await api("/api/state");
+  renderHW(state.hardware);
+  renderPlans(state.plans);
+}
+async function load(path){
+  $("runinfo").textContent = "loading model…";
+  const r = await api("/api/load", {path, ctx:4096});
+  if (r.error){ $("runinfo").textContent = r.error; return; }
+  loadedPath = path;
+}
+async function poll(){
+  try{
+    const s = await api("/api/status");
+    $("b-net").textContent = s.online ? "network: online" : "network: offline";
+    $("b-net").className = "badge " + (s.online ? "" : "ok");
+    $("b-drive").textContent = s.drive_attached ? "drive: attached" : "drive: DISCONNECTED";
+    $("b-drive").className = "badge " + (s.drive_attached ? "ok" : "bad");
+    const L = s.loaded;
+    $("b-model").textContent = s.loading ? "model: loading…" : L ? (L.ok ? `model: ${L.name}` : "model: failed") : "model: none";
+    $("m-rss").textContent = s.llama.running ? `${s.llama.rss_gb} GB` : "–";
+    $("tune").disabled = !(L && L.ok) || s.loading;
+    if (L && !s.loading) $("runinfo").textContent = L.ok ? `loaded in ${L.load_s}s · llama-server ${L.args.join(" ")}` : `failed to start: ${(s.llama.history.at(-1) || {}).error || ""}`;
+  }catch(e){}
+}
+async function ask(){
+  $("constraints").textContent = "thinking…";
+  const r = await api("/api/assist", {goal: $("goal").value, use_meta: $("useMeta").checked});
+  const c = r.constraints;
+  const src = c.backend.startsWith("meta") ? `Meta Model API (${c.backend.slice(5)}, cloud)` : "offline rules (local)";
+  $("constraints").innerHTML = `<strong>${esc(src)}</strong>: priority ${esc(c.priority)}, context ≥ ${c.min_ctx}, task "${esc(c.task)}"${c.must_be_offline ? ", offline required" : ""}. ${esc(c.explanation)}<br>Every suggestion below was re-checked by the local planner against this computer's measured memory.`;
+  renderPlans(r.plans);
+}
+async function send(){
+  const text = $("prompt").value.trim(); if (!text) return;
+  $("prompt").value = "";
+  history.push({role:"user", content:text});
+  const box = $("chat");
+  box.insertAdjacentHTML("beforeend", `<p class="msg"><b>you</b>${esc(text)}</p><p class="msg"><b>local model</b><span></span></p>`);
+  const out = box.lastElementChild.querySelector("span");
+  const t0 = performance.now(); let first = null, n = 0, reply = "";
+  const r = await fetch("/api/chat", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({messages:history, max_tokens:512})});
+  if (!r.ok){ out.textContent = (await r.json()).error; return; }
+  const reader = r.body.getReader(); const dec = new TextDecoder(); let buf = "";
+  for(;;){
+    const {done, value} = await reader.read(); if (done) break;
+    buf += dec.decode(value, {stream:true});
+    let i; while ((i = buf.indexOf("\n")) >= 0){
+      const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1);
+      if (!line.startsWith("data:") || line === "data: [DONE]") continue;
+      const j = JSON.parse(line.slice(5));
+      const d = j.choices?.[0]?.delta?.content;
+      if (d){ if (first === null){ first = performance.now(); $("m-ttft").textContent = `${((first - t0)/1000).toFixed(2)} s`; } n++; reply += d; out.textContent = reply; box.scrollTop = box.scrollHeight; }
+      if (j.timings){
+        $("m-tps").textContent = `${j.timings.predicted_per_second.toFixed(1)} tok/s`;
+        $("m-pps").textContent = `${j.timings.prompt_per_second.toFixed(0)} tok/s`;
+      }
+    }
+  }
+  history.push({role:"assistant", content:reply});
+}
+async function tune(){
+  if (!loadedPath) return;
+  $("tuneLog").hidden = false; $("tuneLog").textContent = "starting…";
+  await api("/api/tune", {path: loadedPath});
+  const timer = setInterval(async () => {
+    const t = await api("/api/tune");
+    $("tuneLog").textContent = t.log.join("\n");
+    if (!t.running && t.result){
+      clearInterval(timer);
+      const rows = t.result.all.filter(x => x.ok).map(x => {
+        const cfg = x.config.label || Object.entries(x.config).map(([k,v]) => `${k}=${v}`).join(" ");
+        const best = x === t.result.best || JSON.stringify(x.config) === JSON.stringify(t.result.best?.config);
+        return `<tr${best ? ' class="ok"' : ""}><td>${esc(cfg)}${best ? " ★" : ""}</td><td class="num">${x.pp_tok_s}</td><td class="num">${x.tg_tok_s}</td><td class="num">${x.peak_rss_gb ?? "–"}</td></tr>`;
+      }).join("");
+      $("tuneTable").innerHTML = `<table><thead><tr><th>config</th><th class="num">prompt tok/s</th><th class="num">gen tok/s</th><th class="num">peak RAM GB</th></tr></thead><tbody>${rows}</tbody></table>
+        <p class="small">Measured. Tuned vs defaults: ×${t.result.speedup_tg ?? "–"} generation speed. The model was unloaded for the benchmark; load it again to chat.</p>`;
+    }
+  }, 1500);
+}
+$("ask").onclick = ask; $("send").onclick = send; $("tune").onclick = tune;
+$("prompt").addEventListener("keydown", e => { if (e.key === "Enter") send(); });
+refresh(); poll(); setInterval(poll, 2000);
+</script>
+</body>
+</html>

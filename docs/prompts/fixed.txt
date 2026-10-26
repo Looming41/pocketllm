@@ -1,0 +1,1 @@
+You are a helpful assistant. In about 150 words, explain why running a large language model locally can protect privacy, and name one trade-off compared with a cloud model.
