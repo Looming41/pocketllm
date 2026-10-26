@@ -20,7 +20,7 @@ import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import assistant, core, gguf, planner, runtime, tuner
+from . import assistant, core, gguf, planner, runtime, security, thermal, tuner
 
 UI = os.path.join(os.path.dirname(__file__), "ui", "index.html")
 
@@ -34,6 +34,13 @@ class State:
         self.loading = False
         self.tune = {"running": False, "log": [], "result": None}
         self.net = {"online": None, "checked": 0}
+        self.policy = security.load_policy(runtime.ROOT)
+        self.audit = security.AuditLog(os.path.join(runtime.data_dir(), "audit.jsonl"), self.policy)
+        self.integrity = None
+        if self.policy["verify_manifest"] != "off" and os.path.exists(os.path.join(runtime.ROOT, security.MANIFEST)):
+            self.integrity = security.verify(runtime.ROOT, self.policy["verify_manifest"])
+        self.audit.write("start", airgap=self.policy["airgap"],
+                         integrity=None if self.integrity is None else self.integrity["ok"])
 
     def get_profile(self, refresh=False):
         with self.lock:
@@ -44,7 +51,11 @@ class State:
 
     def online(self):
         if time.time() - self.net["checked"] > 10:
-            self.net = {"online": core.network_online(), "checked": time.time()}
+            if self.policy["airgap"]:
+                # on a closed network even a probe packet is a violation: look at routes only
+                self.net = {"online": security.network_routes()["online_possible"], "checked": time.time()}
+            else:
+                self.net = {"online": core.network_online(), "checked": time.time()}
         return self.net["online"]
 
 
@@ -92,14 +103,31 @@ def make_handler(st: State):
                 drive_ok = os.path.isdir(runtime.models_dir())
                 if st.loaded and not all(os.path.exists(x) for x in st.loaded["files"]):
                     drive_ok = False
+                th = thermal.thermal_state()
                 self._json({"llama": st.llama.status(), "loaded": st.loaded, "loading": st.loading,
-                            "online": st.online(), "drive_attached": drive_ok})
+                            "online": st.online(), "drive_attached": drive_ok, "airgap": st.policy["airgap"],
+                            "integrity": None if st.integrity is None else
+                            {"ok": st.integrity["ok"], "signature": st.integrity.get("signature"),
+                             "problems": (st.integrity.get("modified", []) + st.integrity.get("missing", [])
+                                          + st.integrity.get("unexpected", []))[:5],
+                             "error": st.integrity.get("error")},
+                            "thermal": {"level": th["level"], "suggested": thermal.auto_profile(th)}})
             elif self.path == "/api/tune":
                 self._json(st.tune)
             else:
                 self.send_error(404)
 
+        def _same_origin(self):
+            # browsers attach Origin to cross-site requests; only our own page may drive the API
+            origin = self.headers.get("Origin")
+            if not origin:
+                return True
+            host = self.headers.get("Host", "")
+            return origin in (f"http://{host}", f"https://{host}")
+
         def do_POST(self):
+            if not self._same_origin():
+                return self._json({"error": "cross-origin request refused"}, 403)
             if self.path == "/api/assist":
                 b = self._body()
                 p = st.get_profile()
@@ -107,27 +135,42 @@ def make_handler(st: State):
                 pre = core.recommendations(p)
                 cands = [{"model": r["model"], "verdict": r["verdict"], "size_gb": r["size_gb"],
                           "est_tok_s_upper": r["est_tok_s_upper"]} for r in plan_rows(pre)]
-                c = assistant.interpret(b.get("goal", ""), hw, cands, use_meta=b.get("use_meta", True) and st.online())
+                use_meta = b.get("use_meta", True) and not st.policy["airgap"] and st.online()
+                c = assistant.interpret(b.get("goal", ""), hw, cands, use_meta=use_meta)
+                if st.policy["airgap"]:
+                    c["explanation"] += " (air-gap policy: cloud assistant disabled)"
+                st.audit.write("assist", backend=c.get("backend"))
                 ranked = assistant.choose(c, core.recommendations(p, ctx=c["min_ctx"]))
                 self._json({"constraints": c, "plans": plan_rows(ranked)[:6]})
             elif self.path == "/api/load":
                 b = self._body()
                 path = b["path"]
+                if st.policy["require_offline"] and st.online():
+                    st.audit.write("load_refused", reason="network route present")
+                    return self._json({"error": "policy requires an offline computer: disconnect network first"}, 403)
+                if st.integrity is not None and not st.integrity["ok"]:
+                    return self._json({"error": "drive failed its integrity check; refusing to run"}, 403)
                 if not os.path.isfile(path):
                     return self._json({"error": "model file not found on drive; download it first"}, 400)
                 m = gguf.load(path)
                 spec = planner.ModelSpec.from_gguf(m, path)
-                pl = planner.plan(spec, core.budget(st.get_profile()), ctx=int(b.get("ctx", 4096)))
+                prof = st.get_profile()
+                pl = planner.plan(spec, core.budget(prof), ctx=int(b.get("ctx", 4096)))
                 if pl.verdict == "does_not_fit":
                     return self._json({"error": "does not fit", "plan": pl.to_dict()}, 400)
+                power = b.get("power") or thermal.auto_profile(thermal.thermal_state())
+                if "-t" in pl.args:
+                    pl.args[pl.args.index("-t") + 1] = str(thermal.threads_for(power, prof["cpu"]))
+                st.audit.write("load", model=spec.name, strategy=pl.strategy, power=power)
 
                 def load():
                     st.loading = True
                     t0 = time.time()
-                    ok = st.llama.start_with_fallback(pl.args)
+                    ok = st.llama.start_with_fallback(pl.args, env=pl.env)
                     st.loading = False
                     st.loaded = {"name": spec.name, "path": path, "files": m.paths, "plan": pl.to_dict(),
-                                 "ok": ok, "load_s": round(time.time() - t0, 1), "args": st.llama.args}
+                                 "ok": ok, "load_s": round(time.time() - t0, 1), "args": st.llama.args,
+                                 "env": st.llama.env, "power": power}
                 threading.Thread(target=load, daemon=True).start()
                 self._json({"started": True, "plan": pl.to_dict()})
             elif self.path == "/api/unload":
@@ -162,8 +205,12 @@ def make_handler(st: State):
             body = self._body()
             body["stream"] = True
             body.setdefault("stream_options", {"include_usage": True})
+            msgs = body.get("messages") or []
+            st.audit.write("chat", model=(st.loaded or {}).get("name"), turns=len(msgs),
+                           prompt=str(msgs[-1].get("content", "")) if msgs else "")
             req = urllib.request.Request(st.llama.url + "/v1/chat/completions", data=json.dumps(body).encode(),
-                                         headers={"Content-Type": "application/json"})
+                                         headers={"Content-Type": "application/json",
+                                                  "Authorization": f"Bearer {st.llama.api_key}"})
             try:
                 upstream = urllib.request.urlopen(req, timeout=600)
             except OSError as e:

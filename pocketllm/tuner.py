@@ -31,18 +31,19 @@ def _rss_bytes(pid):
         return None
 
 
-def run_bench(model_path, cfg: dict, n_prompt=128, n_gen=64, reps=2, timeout=900):
+def run_bench(model_path, cfg: dict, n_prompt=128, n_gen=64, reps=2, timeout=900, env=None):
     """Run one llama-bench configuration. Returns a result dict (never raises)."""
     exe = runtime.binary("llama-bench")
     args = [exe, "-m", model_path, "-p", str(n_prompt), "-n", str(n_gen), "-r", str(reps), "-o", "json"]
     for k, flag in (("threads", "-t"), ("ngl", "-ngl"), ("ncmoe", "-ncmoe"), ("fa", "-fa"), ("load_mode", "-lm"),
-                    ("ubatch", "-ub")):
+                    ("ubatch", "-ub"), ("repack", "--repack")):
         if cfg.get(k) is not None:
             args += [flag, str(cfg[k])]
     peak = [0]
     t0 = time.perf_counter()
     try:
-        proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                env=dict(os.environ, **(env or {})))
     except OSError as e:
         return {"config": cfg, "ok": False, "error": str(e)}
 
@@ -93,6 +94,8 @@ def candidates(plan: dict, profile: dict) -> list:
     if plan.get("n_cpu_moe"):
         base["ncmoe"] = plan["n_cpu_moe"]
     base["load_mode"] = "none" if plan.get("no_mmap") else "mmap"
+    if not plan.get("no_mmap"):
+        base["repack"] = 0
     out = []
     for t in threads:
         for fa in ("off", "on"):
@@ -113,8 +116,11 @@ def tune(model_path, plan: dict, profile: dict, n_prompt=128, n_gen=64, log=prin
     default["label"] = "llama.cpp defaults"
     results.append(default)
     log(_fmt(default))
+    env = plan.get("env") or {}
     for cfg in candidates(plan, profile):
-        r = run_bench(model_path, cfg, n_prompt, n_gen)
+        r = run_bench(model_path, cfg, n_prompt, n_gen, env=env)
+        if env:
+            r["env"] = env
         results.append(r)
         log(_fmt(r))
     ok = [r for r in results if r.get("ok") and r.get("tg_tok_s")]

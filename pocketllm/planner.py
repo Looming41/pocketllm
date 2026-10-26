@@ -76,7 +76,7 @@ class ModelSpec:
 @dataclass
 class Plan:
     model: str
-    strategy: str            # full_gpu | moe_hybrid | partial_gpu | cpu_ram | disk_paging | impossible
+    strategy: str            # full_gpu | moe_hybrid | partial_gpu | cpu_ram | disk_paging | expert_stream | impossible
     verdict: str             # fits | slow | impractical | does_not_fit
     ctx: int
     gpu_bytes: int = 0
@@ -90,6 +90,7 @@ class Plan:
     bottleneck: str = ""
     notes: list = field(default_factory=list)
     args: list = field(default_factory=list)
+    env: dict = field(default_factory=dict)   # runtime environment (PocketLLM streaming engine)
 
     def to_dict(self):
         d = asdict(self)
@@ -268,6 +269,13 @@ def _finish_cpu_side(p: Plan, spec, b: Budget, cpu_bytes, cpu_active, ram_for_we
         p.strategy, p.verdict = "impossible", "does_not_fit"
         return
     p.strategy = "disk_paging"
+    if spec.is_moe:
+        # PocketLLM expert streaming (patched llama.cpp, ggml-pocket): read exactly the routed
+        # experts, concurrently, with fault read-around off. Without it, llama.cpp's mmap
+        # read-around fetches neighbouring unused experts (measured ~2.5-3x read amplification).
+        p.strategy = "expert_stream"
+        p.env = {"POCKET_MOE": "1", "POCKET_MOE_PREDICT": "0", "POCKET_MOE_NORA": "1"}
+        p.notes.append("PocketLLM expert streaming: only routed experts are read from the drive")
     miss = paged / cpu_bytes  # share of CPU-side weights that are not resident at any moment
     p.est_tok_s_upper, p.bottleneck = _speed(cpu_active * (1 - miss), cpu_active * miss, b, gpu_active)
     p.notes.append(f"{paged / GB:.1f} GB of weights do not fit in RAM and are re-read from storage while generating")
@@ -293,6 +301,8 @@ def build_args(spec: ModelSpec, p: Plan, b: Budget) -> list:
     # -lm none: read the whole model into RAM (USB can be unplugged after load);
     # -lm mmap: page weights in on demand (needed when the model exceeds RAM)
     args += ["-lm", "none" if p.no_mmap else "mmap"]
+    if not p.no_mmap:
+        args += ["--no-repack"]  # repacking copies weights into RAM and defeats streaming
     return args
 
 

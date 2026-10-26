@@ -63,6 +63,21 @@ CATALOG = [
         "hf": "ggml-org/gpt-oss-120b-GGUF", "role": "100B-class comparison (very sparse MoE)",
     },
     {
+        # 30.5B total / 3.3B active, 128 experts top-8, 48 layers, 4 KV heads x 128.
+        # Less work per token than a 7B dense model: the fanless-laptop pick (non-Meta reference).
+        "id": "qwen3-30b-a3b", "family": "Qwen3 MoE", "params_b": 30.5, "active_b": 3.3,
+        "n_layer": 48, "kv": 48 * 4 * 256 * 2, "expert_frac": 0.95, "ctx": 32768,
+        "quants": ["Q4_K_M", "IQ2_XXS"], "license": "Apache 2.0",
+        "hf": "unsloth/Qwen3-30B-A3B-GGUF", "role": "30B-class MoE for 16 GB laptops (expert streaming)",
+    },
+    {
+        # 20.9B total / 3.6B active, 32 experts top-4, 24 layers; native MXFP4.
+        "id": "gpt-oss-20b", "family": "OpenAI gpt-oss", "params_b": 20.9, "active_b": 3.6,
+        "n_layer": 24, "kv": 24 * 8 * 128 * 2, "expert_frac": 0.95, "ctx": 131072,
+        "quants": ["MXFP4"], "license": "Apache 2.0",
+        "hf": "ggml-org/gpt-oss-20b-GGUF", "role": "20B-class MoE that fits 16 GB RAM",
+    },
+    {
         "id": "llama-4-maverick-17b-128e-instruct", "family": "Meta Llama 4", "params_b": 400, "active_b": 17,
         "n_layer": 48, "kv": 48 * 8 * 256 * 2, "expert_frac": 0.96, "ctx": 1_000_000,
         "quants": ["Q2_K", "IQ1_S"], "license": "Llama 4 Community License",

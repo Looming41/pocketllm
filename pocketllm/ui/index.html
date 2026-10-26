@@ -29,6 +29,7 @@ input[type=text],textarea{font:inherit;width:100%;padding:8px;border:1px solid v
 .metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin:10px 0}
 .metric{background:var(--chip);border-radius:6px;padding:8px}.metric span{display:block;font-size:11px;color:var(--muted)}.metric strong{font-size:17px;font-variant-numeric:tabular-nums}
 .small{font-size:12px;color:var(--muted)}pre{white-space:pre-wrap;font-size:12px;background:var(--bg);padding:8px;border-radius:6px;max-height:220px;overflow:auto}
+select{font:inherit;padding:4px 6px;border-radius:6px;border:1px solid var(--line);background:var(--bg);color:var(--ink);margin-left:6px}
 label.toggle{display:flex;gap:6px;align-items:center;font-size:12px;color:var(--muted);margin-top:6px}
 </style>
 </head>
@@ -39,6 +40,9 @@ label.toggle{display:flex;gap:6px;align-items:center;font-size:12px;color:var(--
     <span class="badge" id="b-drive">drive: …</span>
     <span class="badge" id="b-net">network: …</span>
     <span class="badge" id="b-model">model: none</span>
+    <span class="badge" id="b-airgap" hidden>AIR-GAP</span>
+    <span class="badge" id="b-integrity" hidden>integrity: …</span>
+    <span class="badge" id="b-thermal">thermal: …</span>
   </div>
 </header>
 <div class="notice">Prototype. The USB drive carries the software and model files; <strong>all inference runs on this computer's own CPU/GPU and memory</strong>. Speeds marked "≤" are upper-bound estimates; numbers from the benchmark are measured.</div>
@@ -68,6 +72,8 @@ label.toggle{display:flex;gap:6px;align-items:center;font-size:12px;color:var(--
       </div>
       <div id="chat"></div>
       <div class="row" style="margin-top:8px"><input type="text" id="prompt" placeholder="Ask the local model…"><button class="primary" id="send">Send</button></div>
+      <label class="toggle">Power profile for the next load:
+        <select id="power"><option value="">auto (thermal)</option><option value="cool">cool (fanless laptops)</option><option value="balanced">balanced</option><option value="max">max</option></select></label>
       <p class="small" id="runinfo"></p>
     </section>
     <section>
@@ -103,7 +109,7 @@ function renderHW(h){
 function renderPlans(rows){
   $("plans").innerHTML = rows.map(r => {
     const [label, cls] = V[r.verdict];
-    const where = r.strategy.replace("_", " ") + (r.paged_gb ? ` · ${r.paged_gb} GB paged from drive` : "") + (r.n_cpu_moe ? ` · experts of ${r.n_cpu_moe} layers on CPU` : "");
+    const where = (r.strategy === "expert_stream" ? "expert streaming from drive" : r.strategy.replace("_", " ")) + (r.paged_gb ? ` · ${r.paged_gb} GB paged from drive` : "") + (r.n_cpu_moe ? ` · experts of ${r.n_cpu_moe} layers on CPU` : "");
     const btn = r.source === "gguf" ? `<button data-path="${esc(r.path)}" ${r.verdict === "does_not_fit" ? "disabled" : ""}>Load</button>` : `<span class="small">not on drive</span>`;
     return `<tr><td>${esc(r.model)}${r.moe ? ' <span class="small">MoE</span>' : ""}</td><td class="num">${r.size_gb} GB</td>
       <td class="${cls}">${label}</td><td>${esc(where)}</td><td class="num">${r.est_tok_s_upper ?? "–"}</td><td>${btn}</td></tr>`;
@@ -117,7 +123,7 @@ async function refresh(){
 }
 async function load(path){
   $("runinfo").textContent = "loading model…";
-  const r = await api("/api/load", {path, ctx:4096});
+  const r = await api("/api/load", {path, ctx:4096, power: $("power").value || null});
   if (r.error){ $("runinfo").textContent = r.error; return; }
   loadedPath = path;
 }
@@ -132,7 +138,18 @@ async function poll(){
     $("b-model").textContent = s.loading ? "model: loading…" : L ? (L.ok ? `model: ${L.name}` : "model: failed") : "model: none";
     $("m-rss").textContent = s.llama.running ? `${s.llama.rss_gb} GB` : "–";
     $("tune").disabled = !(L && L.ok) || s.loading;
-    if (L && !s.loading) $("runinfo").textContent = L.ok ? `loaded in ${L.load_s}s · llama-server ${L.args.join(" ")}` : `failed to start: ${(s.llama.history.at(-1) || {}).error || ""}`;
+    $("b-airgap").hidden = !s.airgap;
+    $("b-airgap").className = "badge " + (s.online ? "bad" : "ok");
+    $("b-airgap").textContent = s.airgap ? (s.online ? "AIR-GAP: network route present!" : "AIR-GAP: no network") : "";
+    if (s.integrity){
+      $("b-integrity").hidden = false;
+      $("b-integrity").textContent = s.integrity.ok ? "integrity: verified" : "integrity: FAILED";
+      $("b-integrity").className = "badge " + (s.integrity.ok ? "ok" : "bad");
+      $("b-integrity").title = s.integrity.error || s.integrity.problems.join(", ");
+    }
+    $("b-thermal").textContent = `thermal: ${s.thermal.level} → ${s.thermal.suggested}`;
+    $("b-thermal").className = "badge " + (["serious","critical"].includes(s.thermal.level) ? "bad" : "");
+    if (L && !s.loading) $("runinfo").textContent = L.ok ? `loaded in ${L.load_s}s · power ${L.power} · llama-server ${L.args.join(" ")}${Object.keys(L.env || {}).length ? " · engine: " + Object.entries(L.env).map(([k,v]) => k + "=" + v).join(" ") : ""}` : `failed to start: ${(s.llama.history.at(-1) || {}).error || ""}`;
   }catch(e){}
 }
 async function ask(){

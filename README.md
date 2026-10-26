@@ -1,66 +1,59 @@
 # PocketLLM
 
-Plug a drive into a laptop and get a local LLM that is **sized to that machine automatically**: hardware profiling, a placement planner that says *before you download 60 GB* whether a 100B-class model will run (and how fast at best), measured auto-tuning, and a local chat UI with live speed and memory readouts.
+**Run 30B–100B+ Mixture-of-Experts models on laptops that don't have the RAM for them, fully offline, from a USB drive.**
 
-> **What this prototype is, and is not.** The USB drive carries the software, the llama.cpp runtime and the model files. **All inference runs on the host computer's own CPU/GPU and RAM.** The drive adds no compute and no memory. A USB-attached accelerator is a separate, long-term hardware track (see `docs/ROADMAP_HW_KO.md`).
+PocketLLM combines ideas from roughly 50 open-source projects that run large models locally (see `docs/LANDSCAPE_KO.md`). It puts them on a drive you can plug into any laptop:
 
-## What works today (tested)
+1. **Expert streaming engine (ggml-pocket).** This is a ~500-line patch to llama.cpp's CPU MoE kernel. When a model is bigger than RAM, it reads *only the experts the router picked*, as soon as it picks them, with concurrent large reads instead of page-fault-by-page-fault. In our emulated "low-RAM laptop + USB drive" lab this made decode **several times faster** than stock llama.cpp mmap (see Results).
+2. **More drives, more bandwidth.** `pocketllm stripe` spreads the expert tensors over several drives, and the engine reads them in parallel.
+3. **Planner + measured tuner.** Before anything is downloaded, PocketLLM reports whether a model will fit, where each part will live (GPU / RAM / streamed from the drive), and an upper bound on speed. A llama-bench sweep then measures the real speed.
+4. **Air-gap mode for organisations that must not leak data** (defence, government, regulated industry). Cloud features are disabled by policy, network detection sends no packets, the manifest is signed and verified before anything runs, the local model is protected by a per-session key, and the audit log stores metadata only.
+5. **Meta, in two zones.** Online provisioning uses the Meta Model API (Muse Spark) for fleet planning, synthetic eval sets and LLM-as-judge model qualification. The air-gapped field runs Meta open-weight models only (Llama 4 Scout MoE, Llama 3.x, Muse Glimmer). See `docs/META_KO.md`.
+6. **Cluster mode.** It pools the memory of several machines ("compute sticks", mini-PCs, laptops) over a private link with llama.cpp RPC.
 
-| Component | Status | Where it was tested |
-|---|---|---|
-| GGUF header reader (sizes, MoE experts, KV cache/token, split files) | ✅ matches llama-bench byte-for-byte | Linux x64 container |
-| Hardware profiler (CPU, RAM, cgroup limits, NVIDIA/AMD/Apple GPU, USB/removable detection, cold read speed) | ✅ Linux paths exercised; macOS/Windows paths written, **not yet run on real hardware** | Linux |
-| Placement planner (full GPU / MoE expert split `-ncmoe` / partial `-ngl` / CPU / paging from drive) | ✅ 15 unit tests incl. synthetic laptop profiles | — |
-| Measured tuner (llama-bench sweep, default vs tuned, noise-aware) | ✅ | CPU only (no GPU in the build box) |
-| llama-server supervisor with fallback chain and stale-port protection | ✅ | Linux |
-| Web UI (hardware, model verdicts, chat, TTFT/tok/s/RAM, drive + network badges) | ✅ Playwright end-to-end test | Linux + Chromium |
-| Setup assistant via Meta Model API (cloud) with offline fallback | ✅ request format + fallback tested against a mock server; **not yet called against the real API** | — |
+> **Honest scope.** A USB *storage* drive adds capacity and read bandwidth, **not compute**. All inference runs on the host's CPU/GPU. PocketLLM makes large *sparse* (MoE) models practical on small machines by streaming what each token needs. It cannot make a dense 70B model fast on a 16 GB laptop. Fanless laptops run cooler on a ~3B-active MoE than on a 7B dense model, because the work per token is smaller. Thermal profiles cap threads further.
 
-Real-model results: **none yet.** The build machine could not download model weights, so the pipeline was verified with random-weight test models (a dense and a 32-expert MoE GGUF with a real tokenizer). Their output text is meaningless. Their speed numbers only validate the tooling. See `docs/RESULTS.md`.
+## Results (measured, emulated hardware)
 
-## Quick start (on the laptop)
+RESULTS_TABLE_PLACEHOLDER
+
+## Quick start
 
 ```bash
-scripts/build_llamacpp.sh            # pinned llama.cpp; auto-selects Metal / CUDA / Vulkan / CPU
-scripts/check_laptop.sh              # hardware report + feasibility table -> data/laptop_report.txt
-# put GGUF files in models/ (e.g. llama-server -hf <repo>:<quant> downloads, or copy them)
-python3 -m pocketllm plan -v         # verdict + exact llama-server args for every model
-python3 -m pocketllm tune models/<model>.gguf   # measured: defaults vs tuned
-./launch.sh                          # UI at http://127.0.0.1:8080 (launch.command on macOS, launch.bat on Windows)
+scripts/build_llamacpp.sh             # pinned llama.cpp + PocketLLM engine patch + RPC; Metal/CUDA/Vulkan/CPU auto
+scripts/check_laptop.sh               # hardware report + feasibility table -> data/laptop_report.txt
+python3 -m pocketllm plan -v          # verdict, placement, engine env and llama-server args per model
+python3 -m pocketllm tune models/<model>.gguf    # measured: llama.cpp defaults vs PocketLLM
+./launch.sh                           # UI on http://127.0.0.1:8080 (launch.command on macOS, launch.bat on Windows)
 ```
 
-Build a drive: `scripts/make_usb.sh /Volumes/POCKETLLM models/*.gguf` (format the drive as **exFAT**. FAT32 cannot hold files over 4 GB).
+| Command | What it does |
+|---|---|
+| `profile`, `plan`, `inspect`, `tune`, `serve`, `thermal` | hardware, feasibility, GGUF facts, measured tuning, UI, power profiles |
+| `stripe MODEL --drives D1 D2 D3 --link-dir DIR` | split a GGUF across drives for parallel expert reads (llama.cpp split format) |
+| `seal --key K` / `verify --pubkey P [--full]` | sign the drive on the provisioning station / verify before use |
+| `node --host IP` / `cluster MODEL --nodes a:p,b:p --run` | lend a machine's memory / run across machines (llama.cpp RPC) |
+| `fleet-plan`, `evalset`, `qualify` | provisioning with Meta Model API (refuses to run under an air-gap policy) |
 
 ## Architecture
 
 ```
-USB drive (storage only)                      Host computer (does all compute)
-┌──────────────────────────┐   USB 3.x    ┌──────────────────────────────────────────────────────┐
-│ launch.sh/.command/.bat  │ ───────────▶ │ pocketllm (Python, stdlib only)                       │
-│ pocketllm/  (app)        │   files      │  profiler ─▶ planner ─▶ tuner ─▶ runtime supervisor   │
-│ bin/<os>-<arch>/ llama.cpp│             │      │          ▲          │            │             │
-│ models/*.gguf            │              │      │   gguf header       │     llama-server (CPU/GPU)│
-│ data/ (profiles, results)│              │      │   reader            │            │             │
-└──────────────────────────┘              │  web UI (127.0.0.1) ◀──────┴── chat stream, metrics   │
-                                          │  setup assistant ──(optional, internet)──▶ Meta Model API
-                                          └──────────────────────────────────────────────────────┘
+USB drive(s)  ── storage + read bandwidth only ──▶  host laptop (does all compute)
+┌──────────────────────────┐                      ┌───────────────────────────────────────────────────────┐
+│ launch.* · pocketllm/     │                      │ profiler → planner → tuner → runtime supervisor       │
+│ bin/<os>-<arch>/ llama.cpp│  experts streamed     │ llama-server (patched): MUL_MAT_ID hook ─▶ ggml-pocket │
+│   + ggml-pocket engine    │ ◀──── on demand ──── │   prefetch routed experts · per-drive fds · pinning   │
+│ models/*.gguf (striped)   │                      │ web UI · air-gap policy · integrity · audit · thermal │
+│ manifest.json + .sig      │                      │ optional: --rpc nodes (cluster) · Meta API (provision) │
+└──────────────────────────┘                      └───────────────────────────────────────────────────────┘
 ```
 
-* **Load modes.** When the model fits in RAM, PocketLLM loads it fully (`-lm none`), so the drive can be unplugged after loading. When it does not fit, weights are memory-mapped (`-lm mmap`) and re-read from the drive while generating. The planner then reports the paged gigabytes and a storage-bound speed ceiling. In this mode the drive must stay connected.
-* **Why a planner when llama.cpp has `--fit`?** llama.cpp's `--fit` (on by default) adjusts parameters to free memory at load time. PocketLLM decides *before* download or load, explains the decision, and verifies it with measurements.
+## Status and honest limits
+- Every number above comes from an emulated low-RAM machine with throttled loop devices standing in for USB drives, running a **random-weight** MoE model. The model's routing statistics differ from real models, so prediction and pinning still need testing on real models such as Qwen3-30B-A3B and Llama 4 Scout. **No real model has been run yet** because model downloads were blocked in the build environment.
+- The engine is tested on Linux. The macOS path (`F_RDADVISE`, or `POCKET_MOE_IO_THREADS`) compiles from the same code but **has not been run on a Mac yet**. Windows has no streaming engine yet; inference works there without it.
+- llama.cpp RPC has no authentication or encryption. Use it only on a dedicated link.
+- This is not a security-certified product.
 
-## Meta technology used
+Docs (Korean): `docs/LANDSCAPE_KO.md` (survey), `docs/ENGINE_KO.md`, `docs/META_KO.md`, `docs/SECURITY_KO.md`, `docs/RESULTS.md`, `docs/HACKATHON_PLAN_KO.md`, `docs/ROADMAP_HW_KO.md`.
 
-* **Meta Model API** (`https://api.meta.ai/v1`, OpenAI-compatible chat completions; model id configurable, default `muse-spark-1.3`). It turns a natural-language goal ("biggest model that still feels real-time, offline") into constraints. Its output is only a proposal: values are clamped and every model choice is re-checked by the local planner against measured memory. Set `MODEL_API_KEY` to enable it. The UI labels it as cloud.
-* **Meta open-weight models run locally**: Llama 3.x (default chat), **Llama 4 Scout (109B MoE)** as the 100B-class target, and Muse Glimmer once a GGUF is available (llama.cpp at the pinned commit has a `muse-glimmer` architecture).
-
-## Honest limits
-
-* Speeds marked `≤` are upper bounds from a bandwidth model, not measurements.
-* No real 100B-class model has been run yet. On a typical 16–32 GB laptop, Llama 4 Scout Q4 needs paging from storage, and the planner estimates well under 1 tok/s (see `docs/feasibility_matrix.md`).
-* The host needs Python 3 (preinstalled on most Linux; macOS needs Command Line Tools; Windows needs python.org). A single-binary launcher is on the roadmap.
-* Binaries must be built per OS/arch/GPU backend; the drive can carry several in `bin/`.
-
-Docs: `docs/RESEARCH_KO.md` (ecosystem + competitor research), `docs/TEST_PLAN_BIG_MODEL_KO.md`, `docs/HACKATHON_PLAN_KO.md`, `docs/ROADMAP_HW_KO.md`, `docs/RESULTS.md`.
-
-License: MIT for PocketLLM code. llama.cpp is MIT. Models keep their own licenses (Llama Community Licenses, Apache 2.0 for gpt-oss and Muse Glimmer).
+License: MIT (PocketLLM, and the engine patch to MIT-licensed llama.cpp). Models keep their own licenses.

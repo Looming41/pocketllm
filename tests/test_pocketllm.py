@@ -36,11 +36,19 @@ class TestPlanner(unittest.TestCase):
     def test_scout_q4_on_16gb_laptop_pages_from_disk(self):
         b = planner.budget_from_profile(profile(16), disk_gbps=1.0)
         p = planner.plan(scout(), b)
-        self.assertEqual(p.strategy, "disk_paging")
+        self.assertEqual(p.strategy, "expert_stream")
+        self.assertEqual(p.env.get("POCKET_MOE"), "1")
+        self.assertIn("--no-repack", p.args)
         self.assertIn(p.verdict, ("slow", "impractical"))
         self.assertGreater(p.paged_bytes, 40e9)
         self.assertIn("-lm", p.args)
         self.assertEqual(p.args[p.args.index("-lm") + 1], "mmap")
+
+    def test_dense_model_over_ram_pages_without_streaming_engine(self):
+        s = next(s for s in catalog.specs(["llama-3.3-70b-instruct"]) if s.name.endswith("Q4_K_M"))
+        p = planner.plan(s, planner.budget_from_profile(profile(16), disk_gbps=1.0))
+        self.assertEqual(p.strategy, "disk_paging")
+        self.assertEqual(p.env, {})
 
     def test_scout_q4_fits_in_128gb_ram(self):
         p = planner.plan(scout(), planner.budget_from_profile(profile(128)))

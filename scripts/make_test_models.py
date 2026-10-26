@@ -6,7 +6,10 @@ placement, llama-bench tuning, llama-server chat) can be tested on machines
 where real model weights cannot be downloaded. The tokenizer is a real one
 copied from llama.cpp's models/ggml-vocab-qwen2.gguf.
 
-usage: python scripts/make_test_models.py <llama.cpp dir> <out dir>
+usage: python scripts/make_test_models.py <llama.cpp dir> <out dir> [small|big]
+  small: 0.46B dense + 0.95B MoE (pipeline tests)
+  big:   ~4.8B-param MoE, 24 layers x 64 experts (top-8), for expert-streaming
+         experiments where the model must not fit in the RAM limit (~9.7 GB f16)
 """
 import os
 import sys
@@ -14,7 +17,7 @@ import sys
 import numpy as np
 
 
-def main(llama_dir, out_dir):
+def main(llama_dir, out_dir, which="small"):
     sys.path.insert(0, os.path.join(llama_dir, "gguf-py"))
     import gguf
 
@@ -63,41 +66,55 @@ def main(llama_dir, out_dir):
             w.add_expert_used_count(n_used)
             w.add_expert_feed_forward_length(n_ff_exp)
         copy_tokenizer(w)
-        w.add_tensor("token_embd.weight", rnd(n_vocab, n_embd))
-        w.add_tensor("output_norm.weight", np.ones(n_embd, dtype=np.float32))
-        w.add_tensor("output.weight", rnd(n_vocab, n_embd))
+        # (name, numpy shape, dtype); data is generated tensor by tensor while writing,
+        # so models larger than RAM can be produced
+        specs = [("token_embd.weight", (n_vocab, n_embd), np.float16),
+                 ("output_norm.weight", (n_embd,), np.float32),
+                 ("output.weight", (n_vocab, n_embd), np.float16)]
         kv_dim = head_dim * n_head_kv
         for i in range(n_layer):
             p = f"blk.{i}."
-            w.add_tensor(p + "attn_norm.weight", np.ones(n_embd, dtype=np.float32))
-            w.add_tensor(p + "attn_q.weight", rnd(n_embd, n_embd))
-            w.add_tensor(p + "attn_k.weight", rnd(kv_dim, n_embd))
-            w.add_tensor(p + "attn_v.weight", rnd(kv_dim, n_embd))
-            w.add_tensor(p + "attn_output.weight", rnd(n_embd, n_embd))
-            w.add_tensor(p + "attn_q_norm.weight", np.ones(head_dim, dtype=np.float32))
-            w.add_tensor(p + "attn_k_norm.weight", np.ones(head_dim, dtype=np.float32))
-            w.add_tensor(p + "ffn_norm.weight", np.ones(n_embd, dtype=np.float32))
+            specs += [(p + "attn_norm.weight", (n_embd,), np.float32),
+                      (p + "attn_q.weight", (n_embd, n_embd), np.float16),
+                      (p + "attn_k.weight", (kv_dim, n_embd), np.float16),
+                      (p + "attn_v.weight", (kv_dim, n_embd), np.float16),
+                      (p + "attn_output.weight", (n_embd, n_embd), np.float16),
+                      (p + "attn_q_norm.weight", (head_dim,), np.float32),
+                      (p + "attn_k_norm.weight", (head_dim,), np.float32),
+                      (p + "ffn_norm.weight", (n_embd,), np.float32)]
             if moe:
                 n_expert, _, n_ff_exp = moe
-                w.add_tensor(p + "ffn_gate_inp.weight", rnd(n_expert, n_embd).astype(np.float32))
-                w.add_tensor(p + "ffn_gate_exps.weight", rnd(n_expert, n_ff_exp, n_embd))
-                w.add_tensor(p + "ffn_up_exps.weight", rnd(n_expert, n_ff_exp, n_embd))
-                w.add_tensor(p + "ffn_down_exps.weight", rnd(n_expert, n_embd, n_ff_exp))
+                specs += [(p + "ffn_gate_inp.weight", (n_expert, n_embd), np.float32),
+                          (p + "ffn_gate_exps.weight", (n_expert, n_ff_exp, n_embd), np.float16),
+                          (p + "ffn_up_exps.weight", (n_expert, n_ff_exp, n_embd), np.float16),
+                          (p + "ffn_down_exps.weight", (n_expert, n_embd, n_ff_exp), np.float16)]
             else:
-                w.add_tensor(p + "ffn_gate.weight", rnd(n_ff, n_embd))
-                w.add_tensor(p + "ffn_up.weight", rnd(n_ff, n_embd))
-                w.add_tensor(p + "ffn_down.weight", rnd(n_embd, n_ff))
+                specs += [(p + "ffn_gate.weight", (n_ff, n_embd), np.float16),
+                          (p + "ffn_up.weight", (n_ff, n_embd), np.float16),
+                          (p + "ffn_down.weight", (n_embd, n_ff), np.float16)]
+        for name, shape, dt in specs:
+            w.add_tensor_info(name, shape, np.dtype(dt), int(np.prod(shape)) * np.dtype(dt).itemsize)
         w.write_header_to_file()
         w.write_kv_data_to_file()
-        w.write_tensors_to_file()
+        w.write_ti_data_to_file()
+        for name, shape, dt in specs:
+            if name.endswith("norm.weight"):
+                arr = np.ones(shape, dtype=dt)
+            else:
+                arr = rnd(*shape).astype(dt)
+            w.write_tensor_data(arr)
         w.close()
         print(f"wrote {path} ({os.path.getsize(path) / 1e6:.0f} MB)")
 
     os.makedirs(out_dir, exist_ok=True)
+    if which == "big":
+        build("qwen3moe", os.path.join(out_dir, "test-bigmoe-f16.gguf"), n_layer=24, n_embd=2048, n_head=16,
+              n_head_kv=4, n_ff=4096, moe=(64, 8, 512))
+        return
     build("qwen3", os.path.join(out_dir, "test-dense-f16.gguf"), n_layer=12, n_embd=1024, n_head=16, n_head_kv=4, n_ff=3072)
     build("qwen3moe", os.path.join(out_dir, "test-moe-f16.gguf"), n_layer=12, n_embd=1024, n_head=16, n_head_kv=4,
           n_ff=3072, moe=(32, 4, 512))
 
 
 if __name__ == "__main__":
-    main(sys.argv[1], sys.argv[2])
+    main(sys.argv[1], sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else "small")

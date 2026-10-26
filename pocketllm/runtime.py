@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import platform
+import secrets
 import shutil
 import socket
 import subprocess
@@ -68,6 +69,9 @@ class LlamaServer:
         self.log_path = log_path or os.path.join(data_dir(), "llama-server.log")
         self.history = []
         self.started_at = None
+        self.env = {}
+        # random per-session key: other web pages in the browser cannot use the local model
+        self.api_key = secrets.token_urlsafe(24)
 
     @property
     def url(self):
@@ -80,7 +84,7 @@ class LlamaServer:
         except OSError:
             return False
 
-    def start(self, args: list, timeout=600) -> bool:
+    def start(self, args: list, timeout=600, env: dict | None = None) -> bool:
         self.stop()
         # a stale llama-server (e.g. from a crashed session) may still hold the port and would
         # answer our health checks; always start on a port nobody is listening on
@@ -90,7 +94,10 @@ class LlamaServer:
         log = open(self.log_path, "a")
         log.write(f"\n=== {time.strftime('%H:%M:%S')} {' '.join(cmd)}\n")
         log.flush()
-        self.proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT)
+        self.env = dict(env or {})
+        # the key goes through the environment, not argv, so other local users cannot read it from `ps`
+        self.proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT,
+                                     env=dict(os.environ, LLAMA_API_KEY=self.api_key, **self.env))
         self.args = args
         t0 = time.time()
         while time.time() - t0 < timeout:
@@ -106,7 +113,7 @@ class LlamaServer:
         self.history.append({"args": args, "ok": False, "error": f"not healthy after {timeout}s"})
         return False
 
-    def start_with_fallback(self, args: list) -> bool:
+    def start_with_fallback(self, args: list, env: dict | None = None) -> bool:
         """Try the planned args, then progressively safer variants."""
         attempts = [args]
         a = _set(args, "-c", str(min(int(_get(args, "-c", "4096")), 2048)))
@@ -118,7 +125,7 @@ class LlamaServer:
             if att in seen:
                 continue
             seen.append(att)
-            if self.start(att):
+            if self.start(att, env=env):
                 return True
         return False
 
@@ -146,7 +153,7 @@ class LlamaServer:
 
     def status(self) -> dict:
         return {"running": bool(self.proc and self.proc.poll() is None), "healthy": self.healthy(),
-                "args": self.args, "rss_gb": round((self.rss_bytes() or 0) / 1e9, 2),
+                "args": self.args, "env": self.env, "rss_gb": round((self.rss_bytes() or 0) / 1e9, 2),
                 "history": self.history[-5:]}
 
 

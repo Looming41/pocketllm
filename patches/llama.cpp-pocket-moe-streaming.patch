@@ -1,0 +1,551 @@
+diff --git a/ggml/include/ggml-pocket.h b/ggml/include/ggml-pocket.h
+new file mode 100644
+index 0000000..4ae495b
+--- /dev/null
++++ b/ggml/include/ggml-pocket.h
+@@ -0,0 +1,42 @@
++// PocketLLM expert streaming for memory-mapped MoE models on the CPU.
++//
++// When a MoE model is larger than RAM, llama.cpp memory-maps it and the OS
++// faults weights in from storage page by page, synchronously, on the compute
++// threads. That leaves fast storage (NVMe, USB4 SSDs, several drives) mostly
++// idle. This module turns those faults into early, large, concurrent reads:
++//
++//  1. expert prefetch   - as soon as the router has picked the experts of a layer,
++//                         issue async read-ahead for their gate/up/down slices
++//  2. next-layer predict - learn which experts of layer L+1 follow those of layer L
++//                         (online transition counts) and read them ahead
++//  3. hot-expert pinning - keep the most frequently routed experts resident (mlock)
++//  4. multi-file aware   - each mapped file has its own descriptor, so a model whose
++//                         split files live on different drives is read in parallel
++//
++// Enabled with POCKET_MOE=1. Other knobs (environment):
++//   POCKET_MOE_PREDICT=0|1   next-layer prediction (default 1)
++//   POCKET_MOE_PIN_MIB=N     pin up to N MiB of hot experts (default 0 = off)
++//   POCKET_MOE_STATS=path    write routing statistics at exit (and read them at start)
++//   POCKET_MOE_VERBOSE=1     print a summary at exit
++//   POCKET_MOE_NORA=1        disable fault read-around on model mappings (MADV_RANDOM); works
++//                            with or without POCKET_MOE
++#pragma once
++
++#include "ggml.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++// register a read-only file mapping: [addr, addr+size) maps file `fd` from offset 0
++GGML_API void ggml_pocket_register_mapping(const void * addr, size_t size, int fd);
++
++// called by the CPU backend for every MUL_MAT_ID once the expert ids are known
++// counts[e] = number of rows routed to expert e (n_expert entries); n_tokens = ids->ne[1]
++GGML_API void ggml_pocket_moe_hook(const struct ggml_tensor * w, const int64_t * counts, int64_t n_expert, int64_t n_tokens);
++
++GGML_API bool ggml_pocket_enabled(void);
++
++#ifdef __cplusplus
++}
++#endif
+diff --git a/ggml/src/CMakeLists.txt b/ggml/src/CMakeLists.txt
+index fe001a0..41e7843 100644
+--- a/ggml/src/CMakeLists.txt
++++ b/ggml/src/CMakeLists.txt
+@@ -206,6 +206,8 @@ add_library(ggml-base
+             ggml-threading.h
+             ggml-quants.c
+             ggml-quants.h
++            ggml-pocket.c
++            ../include/ggml-pocket.h
+             gguf.cpp)
+ 
+ set_target_properties(ggml-base PROPERTIES
+diff --git a/ggml/src/ggml-cpu/ggml-cpu.c b/ggml/src/ggml-cpu/ggml-cpu.c
+index 53d39d2..7232079 100644
+--- a/ggml/src/ggml-cpu/ggml-cpu.c
++++ b/ggml/src/ggml-cpu/ggml-cpu.c
+@@ -6,6 +6,7 @@
+ #include "traits.h"
+ #include "ggml-cpu-impl.h"
+ #include "ggml-impl.h"
++#include "ggml-pocket.h"
+ #include "quants.h"
+ #include "ggml-threading.h"
+ #include "unary-ops.h"
+@@ -1663,6 +1664,11 @@ static void ggml_compute_forward_mul_mat_id(
+                 matrix_row_counts[i02] += 1;
+             }
+         }
++
++        // PocketLLM: the selected experts are known now - start reading them from storage
++        if (ggml_pocket_enabled()) {
++            ggml_pocket_moe_hook(src0, matrix_row_counts, n_as, ids->ne[1]);
++        }
+     }
+ 
+     // reset current_chunk
+diff --git a/ggml/src/ggml-pocket.c b/ggml/src/ggml-pocket.c
+new file mode 100644
+index 0000000..7f39255
+--- /dev/null
++++ b/ggml/src/ggml-pocket.c
+@@ -0,0 +1,442 @@
++// PocketLLM expert streaming - see ggml/include/ggml-pocket.h for the design.
++#define _GNU_SOURCE
++#include "ggml-pocket.h"
++
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#if defined(_WIN32)
++
++void ggml_pocket_register_mapping(const void * addr, size_t size, int fd) { (void) addr; (void) size; (void) fd; }
++void ggml_pocket_moe_hook(const struct ggml_tensor * w, const int64_t * counts, int64_t n_expert, int64_t n_tokens) {
++    (void) w; (void) counts; (void) n_expert; (void) n_tokens;
++}
++bool ggml_pocket_enabled(void) { return false; }
++
++#else
++
++#include <fcntl.h>
++#include <pthread.h>
++#include <sys/mman.h>
++#include <unistd.h>
++
++#define PK_MAX_MAPS   64
++#define PK_MAX_LAYERS 512
++#define PK_MAX_USED   64
++#define PK_KINDS      4   // gate, up, down, gate_up
++#define PK_PIN_EVERY  32  // re-evaluate the pinned set every N decode tokens
++
++struct pk_map { const char * base; size_t size; int fd; };
++
++struct pk_layer {
++    const char * data[PK_KINDS];
++    size_t       nb2[PK_KINDS];
++    int          map[PK_KINDS];   // index into maps, -1 = not file backed
++    int64_t      n_expert;
++    uint64_t   * count;           // [n_expert] routing counts
++    uint32_t   * trans;           // [n_expert * n_expert_next] transitions to layer + 1
++    int64_t      n_expert_next;
++    int          sel[PK_MAX_USED];
++    int          n_sel;
++    int          pred[PK_MAX_USED];
++    int          n_pred;
++    uint8_t    * pinned;          // [n_expert]
++};
++
++static struct {
++    int    init;
++    int    enabled, predict, verbose, no_readaround;
++    size_t pin_bytes;
++    char   stats_path[1024];
++
++    pthread_mutex_t lock;
++    struct pk_map   maps[PK_MAX_MAPS];
++    int             n_maps;
++    struct pk_layer layers[PK_MAX_LAYERS];
++    int             max_layer;
++
++    int      cur_layer;
++    uint64_t tokens;            // decode tokens observed
++    uint64_t advise_calls, advise_bytes;
++    uint64_t pred_hits, pred_total;
++    size_t   pinned_bytes;
++    int      stats_loaded;
++} pk = { .lock = PTHREAD_MUTEX_INITIALIZER, .cur_layer = -1 };
++
++static void pk_save_stats(void);
++
++static void pk_init(void) {
++    if (pk.init) {
++        return;
++    }
++    pk.init = 1;
++    const char * e = getenv("POCKET_MOE");
++    pk.enabled = e && atoi(e) != 0;
++    e = getenv("POCKET_MOE_NORA");
++    pk.no_readaround = e && atoi(e) != 0;
++    e = getenv("POCKET_MOE_PREDICT");
++    pk.predict = e ? atoi(e) != 0 : 1;
++    e = getenv("POCKET_MOE_VERBOSE");
++    pk.verbose = e && atoi(e) != 0;
++    e = getenv("POCKET_MOE_PIN_MIB");
++    pk.pin_bytes = e ? (size_t) atoll(e) << 20 : 0;
++    e = getenv("POCKET_MOE_STATS");
++    if (e) {
++        snprintf(pk.stats_path, sizeof(pk.stats_path), "%s", e);
++    }
++    if (pk.enabled) {
++        atexit(pk_save_stats);
++    }
++}
++
++bool ggml_pocket_enabled(void) {
++    pk_init();
++    return pk.enabled;
++}
++
++void ggml_pocket_register_mapping(const void * addr, size_t size, int fd) {
++    pk_init();
++    if (!addr || fd < 0) {
++        return;
++    }
++    if (pk.no_readaround) {
++        // MoE access is sparse: fault read-around pulls in neighbouring (unused) experts
++        madvise((void *) addr, size, MADV_RANDOM);
++    }
++    if (!pk.enabled) {
++        return;
++    }
++    pthread_mutex_lock(&pk.lock);
++    if (pk.n_maps < PK_MAX_MAPS) {
++        int own = dup(fd);  // keep our own descriptor: the loader may close its file
++        if (own >= 0) {
++            pk.maps[pk.n_maps++] = (struct pk_map) { (const char *) addr, size, own };
++        }
++    }
++    pthread_mutex_unlock(&pk.lock);
++}
++
++static int pk_find_map(const void * p) {
++    const char * c = (const char *) p;
++    for (int i = 0; i < pk.n_maps; i++) {
++        if (c >= pk.maps[i].base && c < pk.maps[i].base + pk.maps[i].size) {
++            return i;
++        }
++    }
++    return -1;
++}
++
++// async read-ahead of [p, p + n) from the file behind mapping m
++static void pk_advise(int m, const char * p, size_t n) {
++    if (m < 0 || n == 0) {
++        return;
++    }
++    const struct pk_map * mp = &pk.maps[m];
++    off_t off = (off_t) (p - mp->base);
++#if defined(__APPLE__)
++    struct radvisory ra = { .ra_offset = off, .ra_count = (int) (n > INT32_MAX ? INT32_MAX : n) };
++    fcntl(mp->fd, F_RDADVISE, &ra);
++#elif defined(POSIX_FADV_WILLNEED)
++    posix_fadvise(mp->fd, off, (off_t) n, POSIX_FADV_WILLNEED);
++#else
++    long ps = sysconf(_SC_PAGESIZE);
++    uintptr_t b = (uintptr_t) p & ~(uintptr_t) (ps - 1);
++    madvise((void *) b, n + ((uintptr_t) p - b), MADV_WILLNEED);
++#endif
++    pk.advise_calls++;
++    pk.advise_bytes += n;
++}
++
++static void pk_prefetch_expert(struct pk_layer * L, int e) {
++    for (int k = 0; k < PK_KINDS; k++) {
++        if (L->data[k] && L->map[k] >= 0) {
++            pk_advise(L->map[k], L->data[k] + (size_t) e * L->nb2[k], L->nb2[k]);
++        }
++    }
++}
++
++static size_t pk_expert_bytes(const struct pk_layer * L) {
++    size_t b = 0;
++    for (int k = 0; k < PK_KINDS; k++) {
++        if (L->data[k] && L->map[k] >= 0) {
++            b += L->nb2[k];
++        }
++    }
++    return b;
++}
++
++static void pk_pin(struct pk_layer * L, int e, int on) {
++    for (int k = 0; k < PK_KINDS; k++) {
++        if (!L->data[k] || L->map[k] < 0) {
++            continue;
++        }
++        long ps = sysconf(_SC_PAGESIZE);
++        const char * p = L->data[k] + (size_t) e * L->nb2[k];
++        uintptr_t b = (uintptr_t) p & ~(uintptr_t) (ps - 1);
++        size_t n = L->nb2[k] + ((uintptr_t) p - b);
++        if (on) {
++            if (mlock((void *) b, n) != 0 && pk.verbose) {
++                perror("pocket: mlock");
++            }
++        } else {
++            munlock((void *) b, n);
++        }
++    }
++}
++
++// pin the globally most-routed experts up to the byte budget (greedy by count)
++static void pk_update_pins(void) {
++    if (!pk.pin_bytes) {
++        return;
++    }
++    // collect candidates
++    size_t n_cand = 0;
++    for (int l = 0; l <= pk.max_layer; l++) {
++        n_cand += pk.layers[l].count ? (size_t) pk.layers[l].n_expert : 0;
++    }
++    if (!n_cand) {
++        return;
++    }
++    struct cand { uint64_t c; int l, e; } * cs = malloc(n_cand * sizeof(*cs));
++    size_t n = 0;
++    for (int l = 0; l <= pk.max_layer; l++) {
++        struct pk_layer * L = &pk.layers[l];
++        if (!L->count || !pk_expert_bytes(L)) {
++            continue;
++        }
++        for (int e = 0; e < L->n_expert; e++) {
++            if (L->count[e]) {
++                cs[n++] = (struct cand) { L->count[e], l, e };
++            }
++        }
++    }
++    // partial selection sort is fine: n is at most a few tens of thousands
++    size_t budget = pk.pin_bytes, used = 0;
++    uint8_t * want_any = calloc(n ? n : 1, 1);
++    for (size_t i = 0; i < n; i++) {
++        size_t best = i;
++        for (size_t j = i + 1; j < n; j++) {
++            if (cs[j].c > cs[best].c) {
++                best = j;
++            }
++        }
++        struct cand t = cs[i]; cs[i] = cs[best]; cs[best] = t;
++        size_t eb = pk_expert_bytes(&pk.layers[cs[i].l]);
++        if (used + eb > budget) {
++            break;
++        }
++        used += eb;
++        want_any[i] = 1;
++    }
++    // apply: unpin what is no longer wanted, pin new ones
++    for (int l = 0; l <= pk.max_layer; l++) {
++        struct pk_layer * L = &pk.layers[l];
++        if (!L->pinned) {
++            continue;
++        }
++        for (int e = 0; e < L->n_expert; e++) {
++            int want = 0;
++            for (size_t i = 0; i < n && want_any[i]; i++) {
++                if (cs[i].l == l && cs[i].e == e) { want = 1; break; }
++            }
++            if (want && !L->pinned[e]) { pk_pin(L, e, 1); L->pinned[e] = 1; }
++            else if (!want && L->pinned[e]) { pk_pin(L, e, 0); L->pinned[e] = 0; }
++        }
++    }
++    pk.pinned_bytes = used;
++    free(want_any);
++    free(cs);
++}
++
++static int pk_kind(const char * name, int * layer) {
++    char kind[32];
++    if (sscanf(name, "blk.%d.ffn_%31[a-z_]", layer, kind) != 2) {
++        return -1;
++    }
++    if (*layer < 0 || *layer >= PK_MAX_LAYERS) return -1;
++    if (strcmp(kind, "gate_exps") == 0)    return 0;
++    if (strcmp(kind, "up_exps") == 0)      return 1;
++    if (strcmp(kind, "down_exps") == 0)    return 2;
++    if (strcmp(kind, "gate_up_exps") == 0) return 3;
++    return -1;
++}
++
++static void pk_ensure_layer(struct pk_layer * L, int64_t n_expert) {
++    if (L->count) {
++        return;
++    }
++    L->n_expert = n_expert;
++    L->count  = calloc((size_t) n_expert, sizeof(uint64_t));
++    L->pinned = calloc((size_t) n_expert, 1);
++    for (int k = 0; k < PK_KINDS; k++) L->map[k] = -1;
++}
++
++static void pk_load_stats(void) {
++    pk.stats_loaded = 1;
++    if (!pk.stats_path[0]) return;
++    FILE * f = fopen(pk.stats_path, "r");
++    if (!f) return;
++    char tag;
++    int l, e, e2;
++    unsigned long long c;
++    int n = 0;
++    while (fscanf(f, " %c", &tag) == 1) {
++        if (tag == 'C' && fscanf(f, "%d %d %llu", &l, &e, &c) == 3) {
++            if (l >= 0 && l < PK_MAX_LAYERS && pk.layers[l].count && e >= 0 && e < pk.layers[l].n_expert) {
++                pk.layers[l].count[e] += c; n++;
++            }
++        } else if (tag == 'T' && fscanf(f, "%d %d %d %llu", &l, &e, &e2, &c) == 4) {
++            struct pk_layer * L = &pk.layers[l >= 0 && l < PK_MAX_LAYERS ? l : 0];
++            if (L->trans && e >= 0 && e < L->n_expert && e2 >= 0 && e2 < L->n_expert_next) {
++                L->trans[(size_t) e * L->n_expert_next + e2] += (uint32_t) c; n++;
++            }
++        } else {
++            int ch; while ((ch = fgetc(f)) != '\n' && ch != EOF) {}
++        }
++    }
++    fclose(f);
++    if (pk.verbose) fprintf(stderr, "pocket: loaded %d routing statistics from %s\n", n, pk.stats_path);
++}
++
++static void pk_save_stats(void) {
++    if (pk.verbose) {
++        fprintf(stderr, "pocket: tokens=%llu layers=%d maps=%d advise_calls=%llu advise_gb=%.2f "
++                        "pred_hit=%.1f%% (%llu/%llu) pinned_mib=%.0f\n",
++                (unsigned long long) pk.tokens, pk.max_layer + 1, pk.n_maps,
++                (unsigned long long) pk.advise_calls, pk.advise_bytes / 1e9,
++                pk.pred_total ? 100.0 * pk.pred_hits / pk.pred_total : 0.0,
++                (unsigned long long) pk.pred_hits, (unsigned long long) pk.pred_total,
++                pk.pinned_bytes / 1048576.0);
++    }
++    if (!pk.stats_path[0] || !pk.tokens) return;
++    FILE * f = fopen(pk.stats_path, "w");
++    if (!f) return;
++    fprintf(f, "# pocketllm routing stats: C layer expert count | T layer expert next_expert count\n");
++    for (int l = 0; l <= pk.max_layer; l++) {
++        struct pk_layer * L = &pk.layers[l];
++        if (!L->count) continue;
++        for (int e = 0; e < L->n_expert; e++) {
++            if (L->count[e]) fprintf(f, "C %d %d %llu\n", l, e, (unsigned long long) L->count[e]);
++        }
++        if (!L->trans) continue;
++        for (int e = 0; e < L->n_expert; e++) {
++            for (int e2 = 0; e2 < L->n_expert_next; e2++) {
++                uint32_t c = L->trans[(size_t) e * L->n_expert_next + e2];
++                if (c) fprintf(f, "T %d %d %d %u\n", l, e, e2, c);
++            }
++        }
++    }
++    fclose(f);
++}
++
++void ggml_pocket_moe_hook(const struct ggml_tensor * w, const int64_t * counts, int64_t n_expert, int64_t n_tokens) {
++    pk_init();
++    if (!pk.enabled || !w || n_expert <= 0) {
++        return;
++    }
++    int l;
++    int kind = pk_kind(w->name, &l);
++    if (kind < 0) {
++        return;
++    }
++    pthread_mutex_lock(&pk.lock);
++    struct pk_layer * L = &pk.layers[l];
++    pk_ensure_layer(L, n_expert);
++    if (!L->data[kind]) {
++        L->data[kind] = (const char *) w->data;
++        L->nb2[kind]  = w->nb[2];
++        L->map[kind]  = pk_find_map(w->data);
++    }
++    if (l > pk.max_layer) pk.max_layer = l;
++
++    if (l == pk.cur_layer) {          // second/third projection of the same layer: already handled
++        pthread_mutex_unlock(&pk.lock);
++        return;
++    }
++    const int decode = n_tokens == 1;
++    if (decode && l <= pk.cur_layer) {  // layers restart: a new token
++        pk.tokens++;
++        if (pk.tokens == 2 && !pk.stats_loaded) {
++            // all layers are registered after the first token: size transition tables, load stats
++            for (int i = 0; i < pk.max_layer; i++) {
++                struct pk_layer * A = &pk.layers[i], * B = &pk.layers[i + 1];
++                if (A->count && B->count && !A->trans) {
++                    A->n_expert_next = B->n_expert;
++                    A->trans = calloc((size_t) A->n_expert * B->n_expert, sizeof(uint32_t));
++                }
++            }
++            pk_load_stats();
++            pk_update_pins();
++        } else if (pk.tokens % PK_PIN_EVERY == 0) {
++            pk_update_pins();
++        }
++    }
++    pk.cur_layer = l;
++
++    // 1. read the selected experts of this layer (all projections) ahead of the compute threads
++    int n_sel = 0;
++    int sel[PK_MAX_USED];
++    for (int64_t e = 0; e < n_expert; e++) {
++        if (counts[e] > 0) {
++            if (!L->pinned[e]) pk_prefetch_expert(L, (int) e);
++            L->count[e]++;
++            if (n_sel < PK_MAX_USED) sel[n_sel++] = (int) e;
++        }
++    }
++
++    if (decode && n_sel <= PK_MAX_USED) {
++        // score the previous layer's prediction and learn the transition
++        if (l > 0) {
++            struct pk_layer * P = &pk.layers[l - 1];
++            if (P->n_pred) {
++                for (int i = 0; i < n_sel; i++) {
++                    for (int j = 0; j < P->n_pred; j++) {
++                        if (P->pred[j] == sel[i]) { pk.pred_hits++; break; }
++                    }
++                }
++                pk.pred_total += n_sel;
++                P->n_pred = 0;
++            }
++            if (P->trans && P->n_sel) {
++                for (int a = 0; a < P->n_sel; a++) {
++                    for (int b = 0; b < n_sel; b++) {
++                        P->trans[(size_t) P->sel[a] * P->n_expert_next + sel[b]]++;
++                    }
++                }
++            }
++        }
++        memcpy(L->sel, sel, n_sel * sizeof(int));
++        L->n_sel = n_sel;
++
++        // 2. predict the next layer's experts from the transition counts and read them ahead
++        struct pk_layer * N = l + 1 < PK_MAX_LAYERS ? &pk.layers[l + 1] : NULL;
++        if (pk.predict && L->trans && N && N->count) {
++            int64_t nn = L->n_expert_next;
++            uint64_t * score = calloc((size_t) nn, sizeof(uint64_t));
++            uint64_t total = 0;
++            for (int a = 0; a < n_sel; a++) {
++                const uint32_t * row = L->trans + (size_t) sel[a] * nn;
++                for (int64_t b = 0; b < nn; b++) { score[b] += row[b]; total += row[b]; }
++            }
++            L->n_pred = 0;
++            if (total) {
++                for (int k = 0; k < n_sel && k < PK_MAX_USED; k++) {
++                    int64_t best = -1;
++                    for (int64_t b = 0; b < nn; b++) {
++                        if (score[b] && (best < 0 || score[b] > score[best])) best = b;
++                    }
++                    if (best < 0) break;
++                    score[best] = 0;
++                    L->pred[L->n_pred++] = (int) best;
++                    if (!N->pinned[best]) pk_prefetch_expert(N, (int) best);
++                }
++            }
++            free(score);
++        }
++    }
++    pthread_mutex_unlock(&pk.lock);
++}
++
++#endif
+diff --git a/src/llama-model-loader.cpp b/src/llama-model-loader.cpp
+index a963f24..c7f0cc5 100644
+--- a/src/llama-model-loader.cpp
++++ b/src/llama-model-loader.cpp
+@@ -1,3 +1,4 @@
++#include "ggml-pocket.h"
+ #include "llama-model-loader.h"
+ 
+ #include "ggml-alloc.h"
+@@ -1440,6 +1441,8 @@ void llama_model_loader::init_mappings(bool prefetch, llama_mlocks * mlock_mmaps
+ 
+             std::unique_ptr<llama_mmap> mapping = std::make_unique<llama_mmap>(file.get(), prefetch_size, is_numa,
+                     lazy.for_file(idx));
++            // PocketLLM: let the expert streamer read ahead from this file
++            ggml_pocket_register_mapping(mapping->addr(), mapping->size(), file->file_id());
+             mmaps_used.emplace_back(mapping->size(), 0);
+             if (mlock_mmaps) {
+                 std::unique_ptr<llama_mlock> mlock_mmap(new llama_mlock());
