@@ -56,6 +56,14 @@ Reading:
 * Turning read-around off **only for expert tensors** matters. Turning it off for the whole mapping was slower than prefetch alone, because evicted dense weights were then re-read in 4 KB faults (first exploratory run, `docs/results/stream_lab_300mbps.json`).
 * The pread I/O-thread mode is worse than kernel read-ahead hints on Linux. It remains available for macOS, where `F_RDADVISE` is untested.
 
+### R5b: slow drives (100 MB/s each, roughly a cheap USB flash stick), 12 tokens, 2 cold runs (`docs/results/stream_lab_100mbps_reps.json`)
+| config | 1 drive | 2 drives | 3 drives |
+|---|---|---|---|
+| llama.cpp mmap (baseline) | 0.08 ± 0.01 tok/s (19.5 GB read) | 0.09 ± 0.00 (21.1 GB) | 0.20 ± 0.10 (16.0 GB) |
+| **PocketLLM (default)** | **1.31 ± 0.00 (×15.5, 5.2 GB)** | **2.29 ± 0.20 (×25, 5.1 GB)** | **2.76 ± 0.31 (×13.8, 5.1 GB)** |
+
+When the drives are slower, the gain grows, and the engine keeps scaling with drives: ×1.75 with 2 and ×2.1 with 3, against 1 drive.
+
 ### R6: features that did *not* help in this lab (single runs, `docs/results/stream_lab_300mbps.json`)
 | config (1 drive) | tok/s |
 |---|---|
@@ -67,7 +75,7 @@ When bandwidth is the bottleneck, every wrong prediction wastes reads, and pinne
 
 ### R7: correctness
 * `pocketllm stripe` output (3 split files on 3 "drives", symlinked) gives **token-identical** greedy output to the original GGUF in llama-server.
-* The engine only changes *when* data is read, never the computation. Its outputs are the same as stock llama.cpp.
+* The engine only changes *when* data is read, never the computation. Measured: greedy 32-token output from llama-server on the 3.5 GB MoE has the same SHA-256 with the engine off, on (default), and on with prediction and I/O threads.
 * Cluster mode: two local `ggml-rpc-server` nodes (`-ts 0.5,0.5`; node RSS 250 MB and 307 MB) gave greedy output **token-identical** to single-node inference.
 
 ### Caveats
