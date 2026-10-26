@@ -64,6 +64,16 @@ Reading:
 
 When the drives are slower, the gain grows, and the engine keeps scaling with drives: ×1.75 with 2 and ×2.1 with 3, against 1 drive.
 
+### R5c: fast storage. The gain mostly disappears
+Same model and 1.5 GiB cgroup limit, but read from the container's own virtual disk (about 2 GB/s, unthrottled, possibly host-cached), via `pocketllm ab` with the cache evicted before each run, 16 tokens:
+
+| run | stock llama.cpp | PocketLLM engine | ratio |
+|---|---|---|---|
+| 1 | 7.43 tok/s (5.29 GB read) | 7.26 tok/s (5.18 GB) | ×0.98 |
+| 2 | 5.52 tok/s (5.79 GB read) | 8.81 tok/s (4.92 GB) | ×1.6 |
+
+On fast storage, the difference is small and within run-to-run noise. Read amplification here was also much lower than on the loop-device "USB drives" (5–6 GB against 13–21 GB). How much the stock path over-reads depends on the device and filesystem read-ahead settings. **PocketLLM's large gains are specific to slow drives (USB flash, USB 3 SSDs), where every wasted byte costs time.** That matches the product's premise, but the size of the gain must be measured on the user's actual drives (`pocketllm ab`).
+
 ### R6: features that did *not* help in this lab (single runs, `docs/results/stream_lab_300mbps.json`)
 | config (1 drive) | tok/s |
 |---|---|

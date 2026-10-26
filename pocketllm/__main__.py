@@ -180,6 +180,15 @@ def cmd_qualify(a):
     print(f"selected: {rep['selected']}  (saved {out})")
 
 
+def cmd_ab(a):
+    p = core.full_profile(read_test=False)
+    spec = planner.ModelSpec.from_gguf(gguf.load(a.model), a.model)
+    pl = planner.plan(spec, core.budget(p), ctx=a.ctx)
+    print(f"plan: {pl.strategy} / {pl.verdict}")
+    r = tuner.ab_compare(a.model, pl.to_dict(), p, n_gen=a.n_gen)
+    print(f"PocketLLM engine speedup: x{r['speedup']}")
+
+
 def cmd_serve(a):
     from . import server
     server.main(a.host, a.port, a.llama_port)
@@ -209,6 +218,11 @@ def main(argv=None):
     s.add_argument("--n-prompt", type=int, default=128)
     s.add_argument("--n-gen", type=int, default=64)
     s.set_defaults(fn=cmd_tune)
+    s = sub.add_parser("ab", help="measure stock llama.cpp vs the PocketLLM engine on one model")
+    s.add_argument("model")
+    s.add_argument("--ctx", type=int, default=4096)
+    s.add_argument("--n-gen", type=int, default=16)
+    s.set_defaults(fn=cmd_ab)
     s = sub.add_parser("serve")
     s.add_argument("--host", default="127.0.0.1")
     s.add_argument("--port", type=int, default=8080)

@@ -31,6 +31,31 @@ def _rss_bytes(pid):
         return None
 
 
+def read_bytes(pid):
+    """Bytes this process has caused to be read from storage (page-cache misses, read-ahead).
+    Linux: /proc/<pid>/io; macOS: proc_pid_rusage(RUSAGE_INFO_V2).ri_diskio_bytesread."""
+    system = platform.system()
+    if system == "Linux":
+        try:
+            with open(f"/proc/{pid}/io") as f:
+                for line in f:
+                    if line.startswith("read_bytes:"):
+                        return int(line.split()[1])
+        except OSError:
+            return None
+    elif system == "Darwin":
+        try:
+            import ctypes
+            lib = ctypes.CDLL("/usr/lib/libproc.dylib")
+            buf = (ctypes.c_uint64 * 40)()
+            if lib.proc_pid_rusage(int(pid), 2, ctypes.byref(buf)) == 0:
+                # rusage_info_v2: 16-byte uuid, then uint64 fields; ri_diskio_bytesread is the 18th
+                return int(buf[2 + 17])
+        except (OSError, AttributeError):
+            return None
+    return None
+
+
 def run_bench(model_path, cfg: dict, n_prompt=128, n_gen=64, reps=2, timeout=900, env=None):
     """Run one llama-bench configuration. Returns a result dict (never raises)."""
     exe = runtime.binary("llama-bench")
@@ -40,6 +65,7 @@ def run_bench(model_path, cfg: dict, n_prompt=128, n_gen=64, reps=2, timeout=900
         if cfg.get(k) is not None:
             args += [flag, str(cfg[k])]
     peak = [0]
+    io = [None]
     t0 = time.perf_counter()
     try:
         proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
@@ -52,6 +78,9 @@ def run_bench(model_path, cfg: dict, n_prompt=128, n_gen=64, reps=2, timeout=900
             r = _rss_bytes(proc.pid)
             if r:
                 peak[0] = max(peak[0], r)
+            b = read_bytes(proc.pid)
+            if b is not None:
+                io[0] = b
             time.sleep(0.2)
 
     th = threading.Thread(target=watch, daemon=True)
@@ -63,7 +92,8 @@ def run_bench(model_path, cfg: dict, n_prompt=128, n_gen=64, reps=2, timeout=900
         return {"config": cfg, "ok": False, "error": f"timeout after {timeout}s"}
     th.join(1)
     res = {"config": cfg, "ok": proc.returncode == 0, "wall_s": round(time.perf_counter() - t0, 1),
-           "peak_rss_gb": round(peak[0] / 1e9, 2) if peak[0] else None}
+           "peak_rss_gb": round(peak[0] / 1e9, 2) if peak[0] else None,
+           "storage_read_gb": round(io[0] / 1e9, 2) if io[0] is not None else None}
     if proc.returncode != 0:
         res["error"] = (err.strip().splitlines() or ["unknown error"])[-1][:300]
         return res
@@ -149,3 +179,43 @@ def _fmt(r):
         return f"  FAIL {cfg}: {r.get('error')}"
     return (f"  pp {r.get('pp_tok_s', '?'):>8} tok/s | tg {r.get('tg_tok_s', '?'):>7} tok/s | "
             f"peak RSS {r.get('peak_rss_gb')} GB | {cfg}")
+
+
+STREAM_ENV = {"POCKET_MOE": "1", "POCKET_MOE_NORA": "1"}
+
+
+def evict_cache(model_path) -> bool:
+    """Drop the model's pages from the OS cache (Linux, no root needed). Returns False where
+    that is not possible (macOS needs `sudo purge`), so results there may start warm."""
+    if not hasattr(os, "posix_fadvise"):
+        return False
+    from . import gguf
+    ok = True
+    for p in gguf.split_siblings(model_path):
+        try:
+            fd = os.open(os.path.realpath(p), os.O_RDONLY)
+            try:
+                os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+            finally:
+                os.close(fd)
+        except OSError:
+            ok = False
+    return ok
+
+
+def ab_compare(model_path, plan: dict, profile: dict, n_gen=16, log=print):
+    """Quick demo comparison on the same model and settings: stock llama.cpp vs the PocketLLM engine."""
+    cpu = profile.get("cpu", {})
+    threads = cpu.get("physical_cores") or cpu.get("logical_cores") or 4
+    cfg = {"threads": threads, "load_mode": "mmap", "repack": 0,
+           "ngl": plan.get("n_gpu_layers", 0) if profile.get("gpus") else 0}
+    out = {"cold_start": evict_cache(model_path)}
+    for label, env in (("stock llama.cpp", {}), ("PocketLLM engine", plan.get("env") or STREAM_ENV)):
+        evict_cache(model_path)   # both runs start from the drive, not from the other run's page cache
+        r = run_bench(model_path, dict(cfg), n_prompt=0, n_gen=n_gen, reps=1, env=env)
+        r["label"] = label
+        out[label] = r
+        log(f"  {label:18} {r.get('tg_tok_s', 'fail')} tok/s, read {r.get('storage_read_gb')} GB from storage")
+    a, b = out["stock llama.cpp"].get("tg_tok_s"), out["PocketLLM engine"].get("tg_tok_s")
+    out["speedup"] = round(b / a, 2) if a and b else None
+    return out

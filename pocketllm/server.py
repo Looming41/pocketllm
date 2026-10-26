@@ -33,6 +33,8 @@ class State:
         self.loaded = None
         self.loading = False
         self.tune = {"running": False, "log": [], "result": None}
+        self.ab = {"running": False, "log": [], "result": None}
+        self.io_last = None
         self.net = {"online": None, "checked": 0}
         self.policy = security.load_policy(runtime.ROOT)
         self.audit = security.AuditLog(os.path.join(runtime.data_dir(), "audit.jsonl"), self.policy)
@@ -104,6 +106,13 @@ def make_handler(st: State):
                 if st.loaded and not all(os.path.exists(x) for x in st.loaded["files"]):
                     drive_ok = False
                 th = thermal.thermal_state()
+                io_rate = None
+                if st.llama.proc and st.llama.proc.poll() is None:
+                    b, now = tuner.read_bytes(st.llama.proc.pid), time.time()
+                    if b is not None and st.io_last and st.io_last[0] == st.llama.proc.pid:
+                        io_rate = round((b - st.io_last[1]) / max(now - st.io_last[2], 1e-3) / 1e6, 1)
+                    if b is not None:
+                        st.io_last = (st.llama.proc.pid, b, now)
                 self._json({"llama": st.llama.status(), "loaded": st.loaded, "loading": st.loading,
                             "online": st.online(), "drive_attached": drive_ok, "airgap": st.policy["airgap"],
                             "integrity": None if st.integrity is None else
@@ -111,9 +120,12 @@ def make_handler(st: State):
                              "problems": (st.integrity.get("modified", []) + st.integrity.get("missing", [])
                                           + st.integrity.get("unexpected", []))[:5],
                              "error": st.integrity.get("error")},
-                            "thermal": {"level": th["level"], "suggested": thermal.auto_profile(th)}})
+                            "thermal": {"level": th["level"], "suggested": thermal.auto_profile(th)},
+                            "drive_read_mbps": io_rate})
             elif self.path == "/api/tune":
                 self._json(st.tune)
+            elif self.path == "/api/ab":
+                self._json(st.ab)
             else:
                 self.send_error(404)
 
@@ -195,6 +207,25 @@ def make_handler(st: State):
                     res = tuner.tune(path, pl.to_dict(), p, log=st.tune["log"].append, results_path=out)
                     st.tune.update(running=False, result=res)
                 threading.Thread(target=run, daemon=True).start()
+                self._json({"started": True})
+            elif self.path == "/api/ab":
+                b = self._body()
+                if st.ab["running"] or st.tune["running"]:
+                    return self._json({"error": "a benchmark is already running"}, 409)
+                path = b["path"]
+                if st.loaded:  # free memory: the comparison must not compete with a loaded model
+                    st.llama.stop()
+                    st.loaded = None
+                p = st.get_profile()
+                spec = planner.ModelSpec.from_gguf(gguf.load(path), path)
+                pl = planner.plan(spec, core.budget(p))
+                st.ab = {"running": True, "log": [f"A/B on {spec.name} ({pl.strategy})"], "result": None}
+
+                def run_ab():
+                    res = tuner.ab_compare(path, pl.to_dict(), p, log=st.ab["log"].append)
+                    st.ab.update(running=False, result=res)
+                    st.audit.write("ab_compare", model=spec.name, speedup=res.get("speedup"))
+                threading.Thread(target=run_ab, daemon=True).start()
                 self._json({"started": True})
             elif self.path == "/api/chat":
                 self._proxy_chat()
