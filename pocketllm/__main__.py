@@ -195,6 +195,27 @@ def cmd_ab(a):
             json.dump(r, f, indent=2)
 
 
+def cmd_requant(a):
+    from . import requant
+    experts, rest = requant.RECIPES[a.recipe] if a.recipe else (a.experts, a.rest)
+    m = gguf.load(a.model)
+    est = requant.estimate(m, experts, rest)
+    gb = lambda b: f"{b / 1e9:.2f} GB"  # noqa: E731
+    print(f"experts {experts}, everything else {rest}")
+    print(f"  size      {gb(est['source_bytes'])} -> ~{gb(est['total_bytes'])}")
+    print(f"  routed experts {gb(est['source_expert_bytes'])} -> ~{gb(est['expert_bytes'])} "
+          f"(streamed per token: {gb(est['source_expert_bytes_per_token'])} -> ~{gb(est['expert_bytes_per_token'])})")
+    print(f"  everything else {gb(est['source_rest_bytes'])} -> ~{gb(est['rest_bytes'])} (stays in RAM)")
+    if a.dry_run:
+        print(" ".join(requant.command(a.model, a.out or "OUT.gguf", experts, rest, a.imatrix)))
+        return
+    if not a.out:
+        raise SystemExit("--out is required (or use --dry-run)")
+    r = requant.run(a.model, a.out, experts, rest, a.imatrix)
+    print(f"wrote {r['path']}: {gb(r['total_bytes'])}, {gb(r['active_bytes_per_token'])} per token")
+    print("check quality before use: pocketllm qualify / your eval set")
+
+
 def cmd_serve(a):
     from . import server
     server.main(a.host, a.port, a.llama_port)
@@ -231,6 +252,15 @@ def main(argv=None):
     s.add_argument("--cache-mib", type=int, help="v2 cache size (default: available RAM - dense weights - 768 MiB)")
     s.add_argument("--out", help="write the results as JSON")
     s.set_defaults(fn=cmd_ab)
+    s = sub.add_parser("requant", help="low-bit routed experts + 8-bit attention: smaller model, fewer bytes per token")
+    s.add_argument("model")
+    s.add_argument("--out")
+    s.add_argument("--recipe", choices=["experts-q4", "experts-q3", "experts-q2", "experts-q2-small", "experts-iq2"])
+    s.add_argument("--experts", default="q2_k", help="type for routed experts (default q2_k)")
+    s.add_argument("--rest", default="q8_0", help="type for everything else (default q8_0)")
+    s.add_argument("--imatrix", help="importance matrix from llama-imatrix (needed for iq2 types)")
+    s.add_argument("--dry-run", action="store_true", help="print the size estimate and command only")
+    s.set_defaults(fn=cmd_requant)
     s = sub.add_parser("serve")
     s.add_argument("--host", default="127.0.0.1")
     s.add_argument("--port", type=int, default=8080)

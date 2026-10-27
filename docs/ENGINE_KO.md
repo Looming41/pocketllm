@@ -20,7 +20,7 @@ llama.cpp CPU 백엔드의 `MUL_MAT_ID`(MoE 행렬곱)에서 **스레드 0이 �
 
 **OS별 구현:** Linux는 `posix_fadvise(WILLNEED)`와 `madvise(MADV_RANDOM)`, `mlock`을 씁니다. macOS는 `fcntl(F_RDADVISE)`(또는 `pread` 스레드)를 씁니다. Windows는 `PrefetchVirtualMemory`(Windows 8 이상, 실행 시점에 찾아 씀)와 `VirtualLock`을 쓰며, read-around 제어에 해당하는 기능은 없습니다. 세 OS 모두 zig로 교차 컴파일했을 때 경고가 없었고, 네이티브 빌드와 테스트는 GitHub Actions에서 합니다.
 
-- **변경 범위:** llama.cpp 5개 파일, 약 500줄(`patches/llama.cpp-pocket-moe-streaming.patch`). 계산 커널은 llama.cpp 것을 그대로 씁니다. 그래서 **결과 토큰은 동일**합니다(엔진은 읽는 시점만 바꿈).
+- **변경 범위:** llama.cpp 6개 파일, 약 1,070줄(v1 프리페치 약 500줄 + v2 캐시·lookahead·top-k·warm)(`patches/llama.cpp-pocket-moe-streaming.patch`). 계산 커널은 llama.cpp 것을 그대로 씁니다. 그래서 **결과 토큰은 동일**합니다(엔진은 읽는 시점만 바꿈. 출력을 바꾸는 것은 사용자가 명시적으로 켜는 top-k와 requant뿐).
 - **멀티 드라이브 분할:** `pocketllm stripe`가 전문가 텐서를 gate→드라이브0, up→드라이브1, down→드라이브2 식으로 돌려 담고, llama.cpp 표준 분할 형식과 심볼릭 링크로 묶습니다. 분할본이 원본과 같은 출력을 내는 것을 검증했습니다.
 
 ## 3. 실험 방법 (에뮬레이션임을 명시)
@@ -47,3 +47,17 @@ llama.cpp CPU 백엔드의 `MUL_MAT_ID`(MoE 행렬곱)에서 **스레드 0이 �
 - 독립 비교: TinyGiant가 보고한 M1 16GB 실측(Qwen3-30B-A3B, llama.cpp 1.06 → 2.68 tok/s✳)은 같은 원리입니다. PocketLLM은 이를 llama.cpp 내부 훅(커널 재사용, 분할·다중 드라이브 지원)으로 구현했습니다.
 
 원자료: `docs/results/stream_lab_300mbps_reps.json`, 표 생성: `python3 scripts/lab_report.py docs/results/*.json`
+
+## 5. 참고 프로젝트에서 가져온 것과 실측 결과 (R8)
+| 출처 | 가져온 원리 | PocketLLM 구현 | 이 실험실 결과 | 기본값 |
+|---|---|---|---|---|
+| [giannisanni/pulsar](https://github.com/giannisanni/pulsar) (MIT) | 앱 자체 LFU 전문가 캐시, 병렬 I/O(io_uring QD32), 라우터 lookahead | 엔진 v2: LFU + 접촉 횟수 기반 입장, `pread` 풀, 프로젝션별 준비 상태, 다음 레이어 라우터 미리 계산 | v1보다 느림(4.17 → 2.47~3.55 tok/s). lookahead는 1.65 | 끔. `POCKET_MOE_CACHE_MIB=N`, `POCKET_MOE_LOOKAHEAD=1` |
+| [SharpAI/SwiftLM](https://github.com/SharpAI/SwiftLM) | "앱 메모리에 전문가를 캐시하지 말 것"(OS 페이지 캐시에 맡김), `--stream-experts`, top-k 축소 | v1을 기본으로 유지. **SwiftLM을 맥(MLX) 백엔드로 연결**(`pocketllm/mlx.py`, 플래너가 `--stream-experts` 인자 생성). `POCKET_MOE_TOPK` | 위 v2 결과가 SwiftLM의 관찰과 같음. top-k 6: ×1.5, top-k 4: **×2.5** (9.06 tok/s) | top-k는 품질 손실이 있어 사용자가 명시적으로 선택 |
+| [EfficientMoE/MoE-Infinity](https://github.com/EfficientMoE/MoE-Infinity) (Apache-2.0) | 요청 단위 활성화 추적, 직전 활성화 기반 프리페치 | 직전 토큰 프리페치 `POCKET_MOE_PREVTOK=1` | 무작위 라우팅에서는 이득 없음(3.56) | 끔. 실모델 실험실에서 재측정 |
+| [giannisanni/pulsar](https://github.com/giannisanni/pulsar) | 전문가는 Q2_K, 나머지는 Q8_0 (`pulsar-quant --map "_exps.=q2_k"`) | `pocketllm requant --recipe experts-q2` (llama-quantize `--tensor-type`) | **Q4 4.15 → 9.34 tok/s (×2.3)**, 나머지를 Q4로 하면 13.76 (×3.3), top-k 4까지 더하면 18.72 (R9) | 프로비저닝에서 품질 검증 후 선택 |
+| Pulsar `.warm` 인기 전문가 기록 | 이전 실행의 라우팅 통계로 첫 토큰부터 인기 전문가를 미리 읽음 | `POCKET_MOE_STATS=파일` + `POCKET_MOE_WARM_MIB=N` | 무작위 라우팅에서 −18% (4.14 → 3.39, RESULTS R10). 학습된 라우터는 편향이 있어 실모델에서 재측정 | 끔 |
+| SwiftLM TurboQuant KV | 스트리밍할 때 KV 캐시를 줄이면 그만큼 가중치 캐시가 늘어남 | 플래너가 스트리밍·페이징일 때 `-fa on -ctk q8_0 -ctv q8_0` 자동 적용(KV 절반) | 문맥이 길수록 효과. 이 실험실(빈 문맥 16토큰)로는 측정 불가 | 자동 |
+| [jhammant/expertflow](https://github.com/jhammant/expertflow) | 온도 기반 축출, 혼합 정밀도, KV 인식 예산 | 혼합 정밀도 → requant, KV 인식 예산 → 플래너 KV 자동 | README 수치는 예상치 | — |
+
+- **top-k 축소는 출력이 바뀝니다.** 엔진의 나머지 기능은 읽는 시점만 바꾸므로 출력이 동일합니다. top-k만 품질과 속도를 맞바꿉니다. 실제 모델에서 품질 손실을 `pocketllm qualify`(Meta 평가)로 잰 다음 허용 범위 안의 k만 제공해야 합니다.
+- 결론: **느린 USB + 작은 RAM**에서는 "필요한 바이트만, 한꺼번에, OS 캐시에 맡겨" 읽는 v1이 가장 빠르고, top-k가 그 위에 곱해집니다.

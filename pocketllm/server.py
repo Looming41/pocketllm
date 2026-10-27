@@ -162,10 +162,16 @@ def make_handler(st: State):
                     return self._json({"error": "policy requires an offline computer: disconnect network first"}, 403)
                 if st.integrity is not None and not st.integrity["ok"]:
                     return self._json({"error": "drive failed its integrity check; refusing to run"}, 403)
-                if not os.path.isfile(path):
+                from . import mlx
+                if os.path.isdir(path) and mlx.is_mlx_dir(path):
+                    spec = mlx.load_spec(path)
+                    files = [path]
+                elif os.path.isfile(path):
+                    m = gguf.load(path)
+                    spec = planner.ModelSpec.from_gguf(m, path)
+                    files = m.paths
+                else:
                     return self._json({"error": "model file not found on drive; download it first"}, 400)
-                m = gguf.load(path)
-                spec = planner.ModelSpec.from_gguf(m, path)
                 prof = st.get_profile()
                 pl = planner.plan(spec, core.budget(prof), ctx=int(b.get("ctx", 4096)))
                 if pl.verdict == "does_not_fit":
@@ -178,9 +184,9 @@ def make_handler(st: State):
                 def load():
                     st.loading = True
                     t0 = time.time()
-                    ok = st.llama.start_with_fallback(pl.args, env=pl.env)
+                    ok = st.llama.start_with_fallback(pl.args, env=pl.env, backend=pl.backend)
                     st.loading = False
-                    st.loaded = {"name": spec.name, "path": path, "files": m.paths, "plan": pl.to_dict(),
+                    st.loaded = {"name": spec.name, "path": path, "files": files, "plan": pl.to_dict(),
                                  "ok": ok, "load_s": round(time.time() - t0, 1), "args": st.llama.args,
                                  "env": st.llama.env, "power": power}
                 threading.Thread(target=load, daemon=True).start()

@@ -70,6 +70,7 @@ class LlamaServer:
         self.history = []
         self.started_at = None
         self.env = {}
+        self.backend = "llama"
         # random per-session key: other web pages in the browser cannot use the local model
         self.api_key = secrets.token_urlsafe(24)
 
@@ -84,13 +85,19 @@ class LlamaServer:
         except OSError:
             return False
 
-    def start(self, args: list, timeout=600, env: dict | None = None) -> bool:
+    def start(self, args: list, timeout=600, env: dict | None = None, backend: str = "llama") -> bool:
+        """backend: "llama" (llama-server + PocketLLM engine) or "swiftlm" (SwiftLM, MLX models on Apple Silicon)."""
         self.stop()
         # a stale llama-server (e.g. from a crashed session) may still hold the port and would
         # answer our health checks; always start on a port nobody is listening on
         if not _port_free(self.port):
             self.port = _free_port()
-        cmd = [binary("llama-server"), *args, "--host", "127.0.0.1", "--port", str(self.port), "--metrics"]
+        if backend == "swiftlm":
+            cmd = [binary("SwiftLM"), *args, "--host", "127.0.0.1", "--port", str(self.port)]
+            timeout = max(timeout, 1800)  # SwiftLM may fetch an MLX model on first use
+        else:
+            cmd = [binary("llama-server"), *args, "--host", "127.0.0.1", "--port", str(self.port), "--metrics"]
+        self.backend = backend
         log = open(self.log_path, "a")
         log.write(f"\n=== {time.strftime('%H:%M:%S')} {' '.join(cmd)}\n")
         log.flush()
@@ -118,8 +125,10 @@ class LlamaServer:
         self.history.append({"args": args, "ok": False, "error": f"not healthy after {timeout}s"})
         return False
 
-    def start_with_fallback(self, args: list, env: dict | None = None) -> bool:
+    def start_with_fallback(self, args: list, env: dict | None = None, backend: str = "llama") -> bool:
         """Try the planned args, then progressively safer variants."""
+        if backend != "llama":
+            return self.start(args, env=env, backend=backend)
         attempts = [args]
         a = _set(args, "-c", str(min(int(_get(args, "-c", "4096")), 2048)))
         attempts.append(a)

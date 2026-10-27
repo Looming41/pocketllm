@@ -17,6 +17,7 @@ install_app() {
   rm -rf "$dest/pocketllm" && cp -R "$ROOT/pocketllm" "$dest/" && find "$dest/pocketllm" -name __pycache__ -prune -exec rm -rf {} +
   cp "$ROOT/launch.sh" "$ROOT/launch.command" "$ROOT/launch.bat" "$ROOT/README.md" "$dest/"
   if [ -d "$ROOT/bin" ]; then cp -RP "$ROOT/bin" "$dest/"; fi
+  if [ -d "$ROOT/python" ]; then cp -RP "$ROOT/python" "$dest/"; fi
   chmod +x "$dest/launch.sh" "$dest/launch.command"
   echo "app installed on $dest (binaries for: $(ls "$dest/bin" 2>/dev/null | tr '\n' ' '))"
 }

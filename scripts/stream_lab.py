@@ -117,11 +117,13 @@ def blk_read_bytes():
 
 
 def bench(bin_dir, model, env_extra, n_gen, threads, timeout):
+    env_extra = dict(env_extra)
+    extra = env_extra.pop("LAB_ARGS", "")  # extra llama-bench arguments (not an environment variable)
     env = dict(os.environ, **env_extra)
     read0 = blk_read_bytes()
     join = f"echo $$ > {CG_V2}/cgroup.procs; " if V2 else f"echo $$ > {CG_MEM}/cgroup.procs; echo $$ > {CG_BLK}/cgroup.procs; "
     cmd = (join +
-           f"exec {bin_dir}/llama-bench -m {model} -p 0 -n {n_gen} -r 1 -t {threads} -lm mmap --repack 0 -o json")
+           f"exec {bin_dir}/llama-bench -m {model} -p 0 -n {n_gen} -r 1 -t {threads} -lm mmap --repack 0 {extra} -o json")
     t0 = time.time()
     try:
         p = subprocess.run(["sh", "-c", cmd], env=env, capture_output=True, text=True, timeout=timeout)
@@ -154,6 +156,15 @@ CONFIGS = [
                                  "POCKET_MOE_LOOKAHEAD": "0"}),                                          # 6
     ("v2 cache + router lookahead", {"POCKET_MOE": "1", "POCKET_MOE_NORA": "1", "POCKET_MOE_CACHE_MIB": "@cache",
                                      "POCKET_MOE_LOOKAHEAD": "1"}),                                      # 7
+    ("v1 + previous-token prefetch", {"POCKET_MOE": "1", "POCKET_MOE_NORA": "1", "POCKET_MOE_PREVTOK": "1"}),  # 8
+    ("v1 + top-k 6 (quality trade-off)", {"POCKET_MOE": "1", "POCKET_MOE_NORA": "1", "POCKET_MOE_TOPK": "6"}),  # 9
+    ("v1 + top-k 4 (quality trade-off)", {"POCKET_MOE": "1", "POCKET_MOE_NORA": "1", "POCKET_MOE_TOPK": "4"}),  # 10
+    ("stock llama.cpp + top-k 4", {"POCKET_MOE": "0", "POCKET_MOE_TOPK": "4"}),                          # 11
+    ("v1 + warm start from routing census", {"POCKET_MOE": "1", "POCKET_MOE_NORA": "1", "POCKET_MOE_STATS": "@stats",
+                                             "POCKET_MOE_WARM_MIB": "@warm"}),                         # 12
+    ("v1, 8K context, f16 KV", {"POCKET_MOE": "1", "POCKET_MOE_NORA": "1", "LAB_ARGS": "-d 8192 -fa 1"}),  # 13
+    ("v1, 8K context, q8_0 KV (planner default when streaming)",
+     {"POCKET_MOE": "1", "POCKET_MOE_NORA": "1", "LAB_ARGS": "-d 8192 -fa 1 -ctk q8_0 -ctv q8_0"}),       # 14
 ]
 
 
@@ -174,6 +185,7 @@ def main():
     ap.add_argument("--configs", help="comma-separated indexes into CONFIGS (default: all)")
     ap.add_argument("--cache-mib", type=int, default=0,
                     help="v2 cache size; default: a quarter of --mem-mib")
+    ap.add_argument("--warm-mib", type=int, default=0, help="warm-start budget; default: a quarter of --mem-mib")
     a = ap.parse_args()
     if os.geteuid() != 0:
         sys.exit("needs root (loop devices, cgroups)")
@@ -204,13 +216,14 @@ def main():
             files = [os.path.join(os.path.dirname(model), x) for x in os.listdir(os.path.dirname(model))
                      if x.endswith(".gguf")] if n > 1 else [model]
             for label, env in configs:
-                if "POCKET_MOE_PIN_MIB" in env and not os.path.exists(stats):
-                    # calibration pass to collect routing statistics
+                if ("POCKET_MOE_PIN_MIB" in env or "POCKET_MOE_STATS" in env) and not os.path.exists(stats):
+                    # calibration pass to collect routing statistics (the census a previous session leaves)
                     flush_cache(files)
                     bench(a.llama_bin, model, {"POCKET_MOE": "1", "POCKET_MOE_NORA": "1", "POCKET_MOE_STATS": stats},
-                          8, a.threads, a.timeout)
-                cache = str(a.cache_mib or v2_cache)
-                env = {k: (cache if v == "@cache" else v) for k, v in env.items()}
+                          32, a.threads, a.timeout)
+                subst = {"@cache": str(a.cache_mib or v2_cache), "@stats": stats,
+                         "@warm": str(a.warm_mib or a.mem_mib // 4)}
+                env = {k: subst.get(v, v) for k, v in env.items()}
                 for rep_i in range(a.reps):
                     flush_cache(files)
                     env = dict(env, POCKET_MOE_VERBOSE="1")

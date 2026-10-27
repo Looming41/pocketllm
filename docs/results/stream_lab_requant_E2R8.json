@@ -1,0 +1,74 @@
+{
+  "model": "test-bigmoe-E2R8.gguf",
+  "model_gb": 2.53,
+  "mem_mib": 1536,
+  "drive_mbps": 300,
+  "n_gen": 16,
+  "threads": 4,
+  "runs": [
+    {
+      "ok": true,
+      "wall_s": 87.9,
+      "tg_tok_s": 0.217,
+      "stddev": 0.0,
+      "drive_read_gb": 21.85,
+      "drives": 1,
+      "config": "llama.cpp mmap (baseline)",
+      "rep": 0
+    },
+    {
+      "ok": true,
+      "wall_s": 46.6,
+      "tg_tok_s": 0.576,
+      "stddev": 0.0,
+      "drive_read_gb": 11.28,
+      "drives": 1,
+      "config": "llama.cpp mmap (baseline)",
+      "rep": 1
+    },
+    {
+      "ok": true,
+      "wall_s": 12.3,
+      "pocket": "pocket: tokens=16 layers=24 maps=1 advise_calls=9408 advise_gb=3.24 pred_hit=0.0% (0/0) pinned_mib=0",
+      "tg_tok_s": 10.044,
+      "stddev": 0.0,
+      "drive_read_gb": 3.53,
+      "drives": 1,
+      "config": "expert prefetch + no read-around on experts",
+      "rep": 0
+    },
+    {
+      "ok": true,
+      "wall_s": 13.8,
+      "pocket": "pocket: tokens=16 layers=24 maps=1 advise_calls=9408 advise_gb=3.24 pred_hit=0.0% (0/0) pinned_mib=0",
+      "tg_tok_s": 8.633,
+      "stddev": 0.0,
+      "drive_read_gb": 3.53,
+      "drives": 1,
+      "config": "expert prefetch + no read-around on experts",
+      "rep": 1
+    },
+    {
+      "ok": true,
+      "wall_s": 11.5,
+      "pocket": "pocket: tokens=16 layers=24 maps=1 advise_calls=4704 advise_gb=1.62 pred_hit=0.0% (0/0) pinned_mib=0",
+      "tg_tok_s": 14.241,
+      "stddev": 0.0,
+      "drive_read_gb": 3.33,
+      "drives": 1,
+      "config": "v1 + top-k 4 (quality trade-off)",
+      "rep": 0
+    },
+    {
+      "ok": true,
+      "wall_s": 11.7,
+      "pocket": "pocket: tokens=16 layers=24 maps=1 advise_calls=4704 advise_gb=1.62 pred_hit=0.0% (0/0) pinned_mib=0",
+      "tg_tok_s": 14.715,
+      "stddev": 0.0,
+      "drive_read_gb": 3.33,
+      "drives": 1,
+      "config": "v1 + top-k 4 (quality trade-off)",
+      "rep": 1
+    }
+  ]
+}

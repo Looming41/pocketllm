@@ -88,6 +88,58 @@ When bandwidth is the bottleneck, every wrong prediction wastes reads, and pinne
 * The engine only changes *when* data is read, never the computation. Measured: greedy 32-token output from llama-server on the 3.5 GB MoE has the same SHA-256 with the engine off, on (default), and on with prediction and I/O threads.
 * Cluster mode: two local `ggml-rpc-server` nodes (`-ts 0.5,0.5`; node RSS 250 MB and 307 MB) gave greedy output **token-identical** to single-node inference.
 
+### R8: ideas from Pulsar and SwiftLM (`docs/results/stream_lab_v2.json`, `stream_lab_v2c_700.json`, `stream_lab_v1x.json`)
+Same lab (1.5 GiB limit, 300 MB/s drives, 2 cold runs each).
+
+**Own expert cache in application memory (engine v2: LFU cache with touch-count admission, parallel `pread` pool, per-projection readiness; Pulsar's design).** It was slower than v1 on every setting we tried:
+
+| config | 1 drive | 2 drives |
+|---|---|---|
+| v1 (prefetch + no read-around) | 4.17 ± 0.07 tok/s | 5.19 ± 2.41 |
+| v2 cache, 384 MiB | 2.47 ± 0.01 | 4.41 ± 0.02 |
+| v2 cache, 700 MiB | 3.55 ± 0.15 | — |
+| v2 + router lookahead (Pulsar: +21% on NVMe/GPU) | 1.65 ± 0.01 | 2.97 ± 0.05 |
+
+Our explanation is that an application-side cache competes with the OS page cache for the same scarce RAM, so the same bytes end up held twice. SwiftLM reports the same finding independently: in its notes, an LRU expert cache in application memory regressed 4.84 to 4.01 tok/s. Lookahead reads experts for layer L+1 from layer L's hidden state. When drive bandwidth is the bottleneck, every wrong guess costs a real read. v2 stays in the patch as opt-in (`POCKET_MOE_CACHE_MIB`) for machines with a fast NVMe drive and spare RAM. **v1 remains the default.**
+
+**Fewer experts per token (top-k reduction, as in SwiftLM `SWIFTLM_TOP_K`).** Through `POCKET_MOE_TOPK` (clamps the model's `expert_used_count` at load):
+
+| config (1 drive) | tok/s | GB read |
+|---|---|---|
+| v1, top-8 (model default) | 3.64 ± 0.82 | 5.4 |
+| v1 + previous-token prefetch | 3.56 ± 0.04 | 5.6 |
+| **v1, top-6** | **5.48 ± 0.30 (×1.5)** | 5.0 |
+| **v1, top-4** | **9.06 ± 0.47 (×2.5)** | 4.6 |
+| stock llama.cpp, top-4 | 1.42 ± 0.01 | 8.3 |
+
+Top-k reduction is a **quality trade-off**. It changes the model's output, unlike the rest of the engine. This lab's random-weight model cannot measure quality loss. On a real model, it has to be measured with `pocketllm qualify` / an eval set before a lower k is offered. The planner exposes it as an explicit option (`plan(topk=...)`) and never applies it silently. Stock llama.cpp gains little from top-k (1.42 tok/s), because its reads are dominated by read-around waste. The two techniques compound.
+
+Previous-token prefetch (start reading the experts the same layer used for the previous token) gave no gain here. Random routing has no temporal locality. Real models do have some, so it stays opt-in (`POCKET_MOE_PREVTOK=1`) for the real-model lab.
+
+### R9: fewer bits for routed experts, 8 or 4 bits for the rest (`pocketllm requant`, Pulsar's recipe)
+Same lab: 1.5 GiB limit, one 300 MB/s drive, 2 cold runs each. The same random-weight model was requantized with `llama-quantize --tensor-type 'ffn_(gate|up|down|gate_up)_exps=q2_k'`. The source was already Q4_K_M (`--allow-requantize`). For real use, start from BF16/Q8_0 and an importance matrix.
+
+| model file | size | stock llama.cpp | PocketLLM v1 | v1 + top-k 4 |
+|---|---|---|---|---|
+| Q4_K_M everywhere (R5) | 3.52 GB | 0.63 ± 0.07 tok/s | 4.15 ± 0.07 | 9.06 ± 0.47 (R8) |
+| **Q2_K experts + Q8_0 rest** | 2.53 GB | 0.40 ± 0.25 | **9.34 ± 1.00 (×2.3 vs Q4)** | 14.48 ± 0.34 |
+| **Q2_K experts + Q4_K rest** | 2.18 GB | 0.55 ± 0.01 | **13.76 ± 0.26 (×3.3 vs Q4)** | **18.72 ± 0.88** |
+
+* The size estimate from `pocketllm requant --dry-run` (header only, no weights read) was 2.52 and 2.08 GB, against 2.53 and 2.17 GB actual. llama-quantize falls back to a wider type for a few tensors whose rows do not fit K-quant blocks.
+* Streamed expert bytes per token fall by about half (Q4_K 4.5 → Q2_K 2.625 bits). The speedup is larger than that, because the smaller model also leaves more of the 1.5 GiB for page cache.
+* **This is a quality trade-off and was not measured here** (random weights). 2-bit experts are what Pulsar and Unsloth's dynamic quants ship for 100B+ MoE models. Every recipe must still pass `pocketllm qualify` on the provisioning station before it goes on a drive.
+* Stock llama.cpp gains nothing. Its read-around waste (12–17 GB read for 16 tokens) dominates whatever the file size is.
+
+### R10: warm start from a routing census (Pulsar's `.warm`; `docs/results/stream_lab_warm.json`)
+A 32-token calibration run saved routing counts (`POCKET_MOE_STATS`). Each measured run then prefetched the most-used experts, up to 384 MiB, right after its first token (`POCKET_MOE_WARM_MIB`). 3 cold runs each:
+
+| config (1 drive) | tok/s |
+|---|---|
+| v1 | 4.14 ± 0.04 |
+| v1 + warm start | 3.39 ± 0.06 (−18%) |
+
+It was a loss here, as expected. A random-weight router has no favourite experts, so the census predicts nothing, and the warm reads compete with the reads the token actually needs. Pulsar measured a gain (19.2 → 25.1 tok/s on Qwen3.6-35B) because trained routers are skewed. It stays **off by default** and is in the real-model CI lab (config 12).
+
 ### Caveats
 Loop devices have almost no access latency, unlike real USB flash, and real models route differently. These are **lab numbers**: the next step is the same measurement on a real laptop with real USB drives and a real MoE model (Qwen3-30B-A3B, Llama 4 Scout), using `scripts/usb_vs_ssd.sh` and `pocketllm tune`.
 

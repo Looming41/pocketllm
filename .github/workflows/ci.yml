@@ -73,6 +73,19 @@ jobs:
         run: |
           python -m pocketllm profile --no-read-test
           python -m pocketllm plan --local-only --no-read-test -v
+          POCKETLLM_BIN=bin/${{ steps.tag.outputs.tag }} python -m pocketllm requant models/test-moe-Q4_K_M.gguf \
+            --recipe experts-q2 --out requant-test/test-moe-E2R8.gguf
+          python -m pocketllm inspect requant-test/test-moe-E2R8.gguf
+
+      - name: Portable Python for the drive (runs PocketLLM without a system Python)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python scripts/fetch_python.py drive --platforms ${{ steps.tag.outputs.tag }}
+          if [ "$RUNNER_OS" = "Windows" ]; then PY=drive/python/${{ steps.tag.outputs.tag }}/python.exe
+          else PY=drive/python/${{ steps.tag.outputs.tag }}/bin/python3; fi
+          "$PY" -I -c "import sys; print(sys.version)"
+          "$PY" -m pocketllm profile --no-read-test
 
       - name: Upload binaries
         uses: actions/upload-artifact@v4

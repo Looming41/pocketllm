@@ -287,3 +287,71 @@ class TestDrives(unittest.TestCase):
                 else:
                     os.environ[k] = v
             shutil.rmtree(d)
+
+
+class TestMLX(unittest.TestCase):
+    def _write(self, path, tensors):
+        import struct
+        header, off = {}, 0
+        for name, nb in tensors:
+            header[name] = {"dtype": "U8", "shape": [nb], "data_offsets": [off, off + nb]}
+            off += nb
+        h = json.dumps(header).encode()
+        with open(path, "wb") as f:
+            f.write(struct.pack("<Q", len(h)) + h + b"\0" * off)
+
+    def test_spec_and_swiftlm_args(self):
+        from pocketllm import mlx, planner
+        d = tempfile.mkdtemp()
+        try:
+            with open(os.path.join(d, "config.json"), "w") as f:
+                json.dump({"num_hidden_layers": 2, "num_experts": 8, "num_experts_per_tok": 2, "hidden_size": 64,
+                           "num_attention_heads": 4, "num_key_value_heads": 2, "max_position_embeddings": 4096}, f)
+            ts = [("model.embed_tokens.weight", 1000)]
+            for i in range(2):
+                ts += [(f"model.layers.{i}.self_attn.q_proj.weight", 100),
+                       (f"model.layers.{i}.mlp.switch_mlp.up_proj.weight", 8000)]
+            self._write(os.path.join(d, "model.safetensors"), ts)
+            self.assertTrue(mlx.is_mlx_dir(d))
+            self.assertEqual(mlx.find_mlx_models(d), [d])
+            s = mlx.load_spec(d)
+            self.assertTrue(s.is_moe)
+            self.assertEqual(s.total_bytes, 1000 + 2 * 100 + 2 * 8000)
+            self.assertEqual(s.layer_expert_bytes, [8000, 8000])
+            self.assertEqual(s.active_bytes, 1000 + 200 + 16000 // 4)
+            b = planner.Budget(ram_budget=planner.COMPUTE_OVERHEAD + 10000, gpu_budget=0, unified=True, ram_bw=1e10, gpu_bw=None,
+                               disk_bw=1e9, threads=4)
+            p = planner.plan(s, b, ctx=16)
+            self.assertEqual(p.backend, "swiftlm")
+            self.assertEqual(p.args[:2], ["--model", d])
+            self.assertIn("--stream-experts", p.args)
+        finally:
+            shutil.rmtree(d)
+
+
+class TestRequantAndKV(unittest.TestCase):
+    def test_estimate_shrinks_streamed_experts(self):
+        from pocketllm import requant
+        m = gguf.load(TEST_MOE)
+        e = requant.estimate(m, "q2_k", "q8_0")
+        self.assertLess(e["expert_bytes"], e["source_expert_bytes"])
+        self.assertLess(e["expert_bytes_per_token"], e["source_expert_bytes_per_token"])
+        self.assertEqual(e["total_bytes"], e["expert_bytes"] + e["rest_bytes"])
+        with self.assertRaises(ValueError):
+            requant.command(TEST_MOE, "out.gguf", "iq2_xxs", "q8_0")  # needs an imatrix
+
+    def test_kv_quantized_only_when_ram_is_short(self):
+        from pocketllm import planner
+        spec = planner.ModelSpec.from_gguf(gguf.load(TEST_MOE), TEST_MOE)
+        big = planner.Budget(ram_budget=64 << 30, gpu_budget=0, unified=False, ram_bw=2e10, gpu_bw=None,
+                             disk_bw=3e8, threads=4)
+        p = planner.plan(spec, big, ctx=4096)
+        self.assertEqual(p.kv_type, "f16")
+        self.assertNotIn("-ctk", p.args)
+        small = planner.Budget(ram_budget=planner.COMPUTE_OVERHEAD + spec.total_bytes // 2, gpu_budget=0,
+                               unified=False, ram_bw=2e10, gpu_bw=None, disk_bw=3e8, threads=4)
+        q = planner.plan(spec, small, ctx=4096)
+        self.assertEqual(q.kv_type, "q8_0")
+        self.assertIn("-ctk", q.args)
+        self.assertEqual(q.args[q.args.index("-fa") + 1], "on")
+        self.assertLess(q.kv_bytes, planner.plan(spec, small, ctx=4096, kv_type="f16").kv_bytes)

@@ -35,6 +35,14 @@ def local_specs(models_root=None) -> list:
             specs.append(planner.ModelSpec.from_gguf(gguf.load(r["path"]), r["path"]))
         except (ValueError, OSError):
             continue
+    # MLX models run through SwiftLM, which only exists for Apple Silicon
+    if runtime.platform_tag() == "macos-arm64" or os.environ.get("POCKETLLM_SHOW_MLX"):
+        from . import mlx
+        for d in mlx.find_mlx_models(models_root or runtime.models_dir()):
+            try:
+                specs.append(mlx.load_spec(d))
+            except (ValueError, OSError, KeyError):
+                continue
     return specs
 
 

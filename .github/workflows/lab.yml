@@ -19,6 +19,13 @@ on:
       drive_mbps:
         description: "Read speed of each emulated USB drive, MB/s"
         default: "300"
+      requant:
+        description: "Also measure the model with Q2_K experts + Q8_0 rest (pocketllm requant)"
+        type: boolean
+        default: true
+      linux_configs:
+        description: "stream_lab config indexes (scripts/stream_lab.py CONFIGS)"
+        default: "0,3,10,12"
       run_mac:
         description: "Also run the Apple Silicon jobs (10x minutes on private repos)"
         type: boolean
@@ -60,10 +67,23 @@ jobs:
           mkdir -p results
           sudo -E env "PATH=$PATH" python scripts/stream_lab.py --model "${{ steps.model.outputs.path }}" \
             --llama-bin bin/linux-x64 --drives 1,2 --drive-mbps ${{ inputs.drive_mbps }} \
-            --mem-mib ${{ inputs.linux_mem_mib }} --n-gen 16 --reps 2 --configs 0,3,6,7 \
+            --mem-mib ${{ inputs.linux_mem_mib }} --n-gen 16 --reps 2 --configs ${{ inputs.linux_configs }} \
             --workdir /mnt/lab --out results/linux_usb_lab.json | tee results/linux_usb_lab.log
           sudo chown -R $USER results
           python scripts/lab_report.py results/linux_usb_lab.json | tee results/linux_usb_lab.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Requantized model (Q2_K experts, Q8_0 rest), 1 drive
+        if: ${{ inputs.requant }}
+        run: |
+          export POCKETLLM_BIN=bin/linux-x64
+          M="${{ steps.model.outputs.path }}"
+          python -m pocketllm requant "$M" --recipe experts-q2 --out /mnt/models/requant-E2R8.gguf | tee results/requant.log
+          sudo rm -rf /mnt/lab
+          sudo -E env "PATH=$PATH" python scripts/stream_lab.py --model /mnt/models/requant-E2R8.gguf \
+            --llama-bin bin/linux-x64 --drives 1 --drive-mbps ${{ inputs.drive_mbps }} \
+            --mem-mib ${{ inputs.linux_mem_mib }} --n-gen 16 --reps 2 --configs 0,3,10 \
+            --workdir /mnt/lab --out results/linux_usb_lab_requant.json | tee results/linux_usb_lab_requant.log
+          sudo chown -R $USER results
+          python scripts/lab_report.py results/linux_usb_lab_requant.json | tee results/linux_usb_lab_requant.md >> "$GITHUB_STEP_SUMMARY"
       - name: Fast disk A/B (no drive throttle)
         run: |
           python -m pocketllm ab "${{ steps.model.outputs.path }}" --n-gen 16 --out results/linux_ab_fastdisk.json || true

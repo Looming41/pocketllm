@@ -1,9 +1,9 @@
 diff --git a/ggml/include/ggml-pocket.h b/ggml/include/ggml-pocket.h
 new file mode 100644
-index 0000000..de3042d
+index 0000000..10d8f4d
 --- /dev/null
 +++ b/ggml/include/ggml-pocket.h
-@@ -0,0 +1,56 @@
+@@ -0,0 +1,60 @@
 +// PocketLLM expert streaming for memory-mapped MoE models on the CPU.
 +//
 +// When a MoE model is larger than RAM, llama.cpp memory-maps it and the OS
@@ -30,6 +30,10 @@ index 0000000..de3042d
 +//                            POCKET_MOE_FETCH_THREADS (default 16) parallel pread()s (POSIX only)
 +//   POCKET_MOE_LOOKAHEAD=0|1 v2: prefetch the next layer's experts by running its router on the
 +//                            current input (default 0)
++//   POCKET_MOE_WARM_MIB=N    warm start: right after the first token, prefetch the experts that
++//                            POCKET_MOE_STATS says are used most, up to N MiB
++//   POCKET_MOE_PREVTOK=1     also prefetch the experts the next layer used for the previous token
++//   POCKET_MOE_TOPK=k        (model load) use at most k routed experts per token: faster, lower quality
 +//   POCKET_MOE_NORA=1        disable fault read-around on routed-expert tensors only (MADV_RANDOM)
 +//   POCKET_MOE_NORA=2        disable it on the whole mapping (diagnostic; works without POCKET_MOE)
 +#pragma once
@@ -122,10 +126,10 @@ index 53d39d2..1933108 100644
  
 diff --git a/ggml/src/ggml-pocket.c b/ggml/src/ggml-pocket.c
 new file mode 100644
-index 0000000..0324dd8
+index 0000000..7e4812a
 --- /dev/null
 +++ b/ggml/src/ggml-pocket.c
-@@ -0,0 +1,945 @@
+@@ -0,0 +1,999 @@
 +// PocketLLM expert streaming - see ggml/include/ggml-pocket.h for the design.
 +#define _GNU_SOURCE
 +#include "ggml-pocket.h"
@@ -245,8 +249,8 @@ index 0000000..0324dd8
 +
 +static struct {
 +    int    init;
-+    int    enabled, predict, verbose, no_readaround, io_threads;
-+    size_t pin_bytes;
++    int    enabled, predict, verbose, no_readaround, io_threads, prevtok;
++    size_t pin_bytes, warm_bytes;
 +    char   stats_path[1024];
 +
 +    pk_mutex        lock;
@@ -287,6 +291,10 @@ index 0000000..0324dd8
 +    pk.verbose = e && atoi(e) != 0;
 +    e = getenv("POCKET_MOE_PIN_MIB");
 +    pk.pin_bytes = e ? (size_t) atoll(e) << 20 : 0;
++    e = getenv("POCKET_MOE_WARM_MIB");
++    pk.warm_bytes = e ? (size_t) atoll(e) << 20 : 0;
++    e = getenv("POCKET_MOE_PREVTOK");
++    pk.prevtok = e && atoi(e) != 0;
 +    e = getenv("POCKET_MOE_IO_THREADS");
 +    pk.io_threads = e ? atoi(e) : 0;
 +    if (pk.io_threads > 32) pk.io_threads = 32;
@@ -886,6 +894,46 @@ index 0000000..0324dd8
 +    if (pk.verbose) fprintf(stderr, "pocket: loaded %d routing statistics from %s\n", n, pk.stats_path);
 +}
 +
++// warm start (Pulsar's .warm census): the routing counts saved by earlier runs say which
++// experts this model uses most; ask the OS to read the hottest ones now, in one burst,
++// instead of faulting them in one by one while generating
++static int pk_cand_cmp(const void * a, const void * b) {
++    uint64_t x = *(const uint64_t *) a, y = *(const uint64_t *) b;
++    return x < y ? 1 : x > y ? -1 : 0;
++}
++
++static void pk_warm(void) {
++    if (!pk.warm_bytes) return;
++    size_t n_cand = 0;
++    for (int l = 0; l <= pk.max_layer; l++) {
++        n_cand += pk.layers[l].count ? (size_t) pk.layers[l].n_expert : 0;
++    }
++    if (!n_cand) return;
++    struct { uint64_t c; int l, e; } * cs = malloc(n_cand * sizeof(*cs));
++    size_t n = 0;
++    for (int l = 0; l <= pk.max_layer; l++) {
++        struct pk_layer * L = &pk.layers[l];
++        for (int e = 0; L->count && e < L->n_expert; e++) {
++            if (L->count[e] > 1) {  // seen more than in this run's first token
++                cs[n].c = L->count[e]; cs[n].l = l; cs[n].e = e; n++;
++            }
++        }
++    }
++    qsort(cs, n, sizeof(*cs), pk_cand_cmp);
++    size_t used = 0;
++    int warmed = 0;
++    for (size_t i = 0; i < n; i++) {
++        struct pk_layer * L = &pk.layers[cs[i].l];
++        size_t eb = pk_expert_bytes(L);
++        if (used + eb > pk.warm_bytes) break;
++        if (!L->pinned[cs[i].e]) pk_prefetch_expert(L, cs[i].e);
++        used += eb;
++        warmed++;
++    }
++    free(cs);
++    if (pk.verbose) fprintf(stderr, "pocket: warm start: %d experts, %.0f MiB requested\n", warmed, used / 1048576.0);
++}
++
 +static void pk_save_stats(void) {
 +    if (pk.verbose) {
 +        fprintf(stderr, "pocket: tokens=%llu layers=%d maps=%d advise_calls=%llu advise_gb=%.2f "
@@ -926,6 +974,7 @@ index 0000000..0324dd8
 +
 +void ggml_pocket_moe_hook(const struct ggml_tensor * w, const int64_t * counts, int64_t n_expert, int64_t n_tokens,
 +                          const struct ggml_tensor * x) {
++    (void) x;  // used by v2 lookahead (POSIX only)
 +    pk_init();
 +    if (!pk.enabled || !w || n_expert <= 0) {
 +        return;
@@ -978,6 +1027,7 @@ index 0000000..0324dd8
 +                }
 +            }
 +            pk_load_stats();
++            pk_warm();
 +            pk_update_pins();
 +        } else if (pk.tokens % PK_PIN_EVERY == 0) {
 +            pk_update_pins();
@@ -1029,6 +1079,14 @@ index 0000000..0324dd8
 +                        P->trans[(size_t) P->sel[a] * P->n_expert_next + sel[b]]++;
 +                    }
 +                }
++            }
++        }
++        // 2a. temporal locality (SwiftLM's speculative pread): the next layer tends to reuse the
++        // experts it picked for the previous token, so start reading those now
++        if (pk.prevtok && !use_v2 && l + 1 < PK_MAX_LAYERS) {
++            struct pk_layer * N2 = &pk.layers[l + 1];
++            for (int i = 0; i < N2->n_sel; i++) {
++                if (N2->count && !N2->pinned[N2->sel[i]]) pk_prefetch_expert(N2, N2->sel[i]);
 +            }
 +        }
 +        memcpy(L->sel, sel, n_sel * sizeof(int));
@@ -1089,3 +1147,26 @@ index a963f24..c7f0cc5 100644
              mmaps_used.emplace_back(mapping->size(), 0);
              if (mlock_mmaps) {
                  std::unique_ptr<llama_mlock> mlock_mmap(new llama_mlock());
+diff --git a/src/llama-model.cpp b/src/llama-model.cpp
+index 78a387e..14ad52f 100644
+--- a/src/llama-model.cpp
++++ b/src/llama-model.cpp
+@@ -1411,6 +1411,18 @@ void llama_model_base::load_hparams(llama_model_loader & ml) {
+     ml.get_key(LLM_KV_EXPERT_COUNT,            hparams.n_expert,        false);
+     std::fill(hparams.n_expert_used_arr.begin(), hparams.n_expert_used_arr.end(), 0);
+     ml.get_key_or_arr(LLM_KV_EXPERT_USED_COUNT, hparams.n_expert_used_arr, hparams.n_layer_all, false);
++    // PocketLLM: runtime top-k reduction (POCKET_MOE_TOPK=k). Fewer routed experts per token means
++    // fewer bytes streamed and less compute, at some quality cost (same idea as SwiftLM's SWIFTLM_TOP_K)
++    if (const char * pocket_topk = getenv("POCKET_MOE_TOPK")) {
++        const uint32_t k = (uint32_t) atoi(pocket_topk);
++        if (k > 0) {
++            for (auto & v : hparams.n_expert_used_arr) {
++                if (v > k) {
++                    v = k;
++                }
++            }
++        }
++    }
+     ml.get_key(LLM_KV_EXPERT_GROUP_COUNT,      hparams.n_expert_groups, false);
+     ml.get_key(LLM_KV_EXPERT_GROUP_USED_COUNT, hparams.n_group_used,    false);
+ 

@@ -44,7 +44,7 @@ class ModelSpec:
     is_moe: bool
     train_ctx: int = 0
     path: str | None = None
-    source: str = "gguf"             # "gguf" (exact) or "estimate"
+    source: str = "gguf"             # "gguf" (exact), "estimate" (catalog), "recipe" (catalog, made by requant), "mlx"
 
     @classmethod
     def from_gguf(cls, m, path=None):
@@ -59,15 +59,22 @@ class ModelSpec:
         )
 
     @classmethod
-    def estimate(cls, name, params_b, active_b, bpw, n_layer, kv_bytes_per_token, expert_frac=0.0, train_ctx=0):
-        """Rough spec from parameter counts. expert_frac = share of weights in routed experts."""
-        total = int(params_b * 1e9 * bpw / 8)
-        active = int(active_b * 1e9 * bpw / 8)
-        non_layer = int(total * 0.02)
-        per_layer = (total - non_layer) / n_layer
-        exp = per_layer * expert_frac
+    def estimate(cls, name, params_b, active_b, bpw, n_layer, kv_bytes_per_token, expert_frac=0.0, train_ctx=0,
+                 expert_bpw=None):
+        """Rough spec from parameter counts. expert_frac = share of weights in routed experts.
+        expert_bpw: routed experts quantized differently from the rest (pocketllm requant)."""
+        ebpw = expert_bpw or bpw
+        p_exp = params_b * 1e9 * expert_frac
+        p_dense = params_b * 1e9 - p_exp
+        dense_b, exp_total = p_dense * bpw / 8, p_exp * ebpw / 8
+        total = int(dense_b + exp_total)
+        active = int(dense_b + max(0.0, active_b * 1e9 - p_dense) * ebpw / 8) if expert_frac else \
+            int(active_b * 1e9 * bpw / 8)
+        non_layer = int(dense_b * 0.02) if expert_frac else int(total * 0.02)
+        dense_layer = (dense_b - non_layer) / n_layer if expert_frac else (total - non_layer) / n_layer
+        exp = exp_total / n_layer
         return cls(name=name, total_bytes=total, n_layer=n_layer,
-                   layer_dense_bytes=[int(per_layer - exp)] * n_layer,
+                   layer_dense_bytes=[int(dense_layer)] * n_layer,
                    layer_expert_bytes=[int(exp)] * n_layer, non_layer_bytes=non_layer,
                    active_bytes=active, kv_bytes_per_token=kv_bytes_per_token,
                    is_moe=expert_frac > 0, train_ctx=train_ctx, source="estimate")
@@ -91,6 +98,9 @@ class Plan:
     notes: list = field(default_factory=list)
     args: list = field(default_factory=list)
     env: dict = field(default_factory=dict)   # runtime environment (PocketLLM streaming engine)
+    backend: str = "llama"                   # llama (llama-server + engine) | swiftlm (MLX on Apple Silicon)
+    topk: int | None = None                  # routed experts per token, if reduced (speed vs quality)
+    kv_type: str = "f16"                     # KV cache type (q8_0 when RAM is short)
 
     def to_dict(self):
         d = asdict(self)
@@ -163,11 +173,37 @@ def _speed(cpu_active, paged_active, b: Budget, gpu_active=0):
     return round(1.0 / t, 2), max(parts, key=parts.get)
 
 
-def plan(spec: ModelSpec, b: Budget, ctx: int = 4096, allow_paging: bool = True) -> Plan:
+KV_BYTES = {"f16": 2.0, "q8_0": 1.0625}  # bytes per element
+
+
+def plan(spec: ModelSpec, b: Budget, ctx: int = 4096, allow_paging: bool = True, topk: int | None = None,
+         n_expert_used: int | None = None, kv_type: str = "auto") -> Plan:
+    """topk: run MoE models with at most this many routed experts per token (needs n_expert_used,
+    the model's default); fewer experts means fewer bytes streamed per token.
+
+    kv_type "auto": f16 KV when everything fits in memory, q8_0 KV otherwise. When weights are
+    streamed, every byte of KV cache is a byte of page cache the weights lose (SwiftLM measured
+    0.32 -> 4.16 tok/s at 40K context on a 126 GB model by compressing the KV cache)."""
+    if kv_type == "auto":
+        p = plan(spec, b, ctx, allow_paging, topk, n_expert_used, "f16")
+        if p.strategy in ("expert_stream", "disk_paging") or p.verdict == "does_not_fit":
+            q = plan(spec, b, ctx, allow_paging, topk, n_expert_used, "q8_0")
+            if q.verdict != "does_not_fit" or p.verdict == "does_not_fit":
+                q.notes.append(f"q8_0 KV cache: {p.kv_bytes / GB:.2f} -> {q.kv_bytes / GB:.2f} GB, "
+                               "more RAM left for caching weights")
+                return q
+        return p
     if spec.train_ctx:
         ctx = min(ctx, spec.train_ctx)
-    kv = spec.kv_bytes_per_token * ctx
-    p = Plan(model=spec.name, strategy="", verdict="", ctx=ctx, kv_bytes=kv)
+    if topk and n_expert_used and spec.is_moe and topk < n_expert_used:
+        experts = sum(spec.layer_expert_bytes)
+        routed_active = max(0, spec.active_bytes - (spec.total_bytes - experts))
+        spec = ModelSpec(**{**spec.__dict__,
+                            "active_bytes": int(spec.active_bytes - routed_active * (1 - topk / n_expert_used))})
+    else:
+        topk = None
+    kv = int(spec.kv_bytes_per_token * ctx * KV_BYTES[kv_type] / 2.0)
+    p = Plan(model=spec.name, strategy="", verdict="", ctx=ctx, kv_bytes=kv, kv_type=kv_type)
     n = spec.n_layer
     dense_layers = sum(spec.layer_dense_bytes)
     experts = sum(spec.layer_expert_bytes)
@@ -217,7 +253,7 @@ def plan(spec: ModelSpec, b: Budget, ctx: int = 4096, allow_paging: bool = True)
                          allow_paging=allow_paging, gpu_active=spec.active_bytes - cpu_active)
     # ---- 3. dense (or MoE whose shared part is too big): offload whole layers
     elif gpu_ok:
-        per_layer = [spec.layer_dense_bytes[i] + spec.layer_expert_bytes[i] + spec.kv_bytes_per_token * ctx / n
+        per_layer = [spec.layer_dense_bytes[i] + spec.layer_expert_bytes[i] + kv / n
                      for i in range(n)]
         room = gpu_free
         k = 0
@@ -244,6 +280,7 @@ def plan(spec: ModelSpec, b: Budget, ctx: int = 4096, allow_paging: bool = True)
         _finish_cpu_side(p, spec, b, cpu_bytes=spec.total_bytes, cpu_active=spec.active_bytes,
                          ram_for_weights=ram_for_weights - kv, allow_paging=allow_paging, kv_cpu=kv)
 
+    p.topk = topk
     p.args = build_args(spec, p, b)
     return p
 
@@ -289,8 +326,23 @@ def _finish_cpu_side(p: Plan, spec, b: Budget, cpu_bytes, cpu_active, ram_for_we
 def build_args(spec: ModelSpec, p: Plan, b: Budget) -> list:
     if p.verdict == "does_not_fit":
         return []
+    if spec.source == "mlx":
+        # SwiftLM (MLX, Apple Silicon): streams experts from the SSD itself when asked to
+        p.backend, p.env = "swiftlm", {}
+        args = ["--model", spec.path, "--ctx-size", str(p.ctx)]
+        if spec.is_moe and p.strategy in ("expert_stream", "disk_paging"):
+            args.append("--stream-experts")
+            p.notes.append("SwiftLM --stream-experts: routed experts are read from the drive per token")
+        if p.topk:
+            p.env["SWIFTLM_TOP_K"] = str(p.topk)
+        return args
+    if p.topk:
+        p.env = dict(p.env, POCKET_MOE_TOPK=str(p.topk))
+        p.notes.append(f"top-k {p.topk}: fewer experts per token - faster, slightly lower quality")
     # catalog entries are not on disk yet: llama.cpp can fetch them with -hf <repo>:<quant>
     src = ["-hf", spec.path] if spec.source == "estimate" else ["-m", spec.path or spec.name]
+    if spec.source == "recipe":
+        p.notes.append("build on the provisioning station: pocketllm requant <bf16/q8 gguf> --experts q2_k --rest q8_0")
     args = [*src, "-c", str(p.ctx), "-t", str(b.threads)]
     if p.strategy == "expert_stream" and b.unified:
         # Apple Silicon: until Metal + mmap'd experts larger than RAM is validated on a Mac,
@@ -306,6 +358,9 @@ def build_args(spec: ModelSpec, p: Plan, b: Budget) -> list:
         args += ["-ncmoe", str(p.n_cpu_moe)]
     # -lm none: read the whole model into RAM (USB can be unplugged after load);
     # -lm mmap: page weights in on demand (needed when the model exceeds RAM)
+    if p.kv_type != "f16":
+        # a quantized V cache needs flash attention in llama.cpp
+        args += ["-fa", "on", "-ctk", p.kv_type, "-ctv", p.kv_type]
     args += ["-lm", "none" if p.no_mmap else "mmap"]
     if not p.no_mmap:
         args += ["--no-repack"]  # repacking copies weights into RAM and defeats streaming

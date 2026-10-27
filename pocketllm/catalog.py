@@ -52,7 +52,8 @@ CATALOG = [
         # Routed-expert share solved from 109 = base + E and 17 = base + E/16 -> E ~ 98B.
         "id": "llama-4-scout-17b-16e-instruct", "family": "Meta Llama 4", "params_b": 109, "active_b": 17,
         "n_layer": 48, "kv": 48 * 8 * 256 * 2, "expert_frac": 0.90, "ctx": 10_000_000,
-        "quants": ["Q4_K_M", "Q3_K_M", "Q2_K", "IQ2_XXS", "IQ1_S"], "license": "Llama 4 Community License",
+        "quants": ["Q4_K_M", "Q3_K_M", "Q2_K", "Q2_K+Q8_0", "IQ2_XXS", "IQ1_S"],
+        "license": "Llama 4 Community License",
         "hf": "unsloth/Llama-4-Scout-17B-16E-Instruct-GGUF", "role": "100B-class target (Meta, MoE)",
     },
     {
@@ -67,7 +68,7 @@ CATALOG = [
         # Less work per token than a 7B dense model: the fanless-laptop pick (non-Meta reference).
         "id": "qwen3-30b-a3b", "family": "Qwen3 MoE", "params_b": 30.5, "active_b": 3.3,
         "n_layer": 48, "kv": 48 * 4 * 256 * 2, "expert_frac": 0.95, "ctx": 32768,
-        "quants": ["Q4_K_M", "IQ2_XXS"], "license": "Apache 2.0",
+        "quants": ["Q4_K_M", "Q2_K+Q8_0", "IQ2_XXS"], "license": "Apache 2.0",
         "hf": "unsloth/Qwen3-30B-A3B-GGUF", "role": "30B-class MoE for 16 GB laptops (expert streaming)",
     },
     {
@@ -76,6 +77,14 @@ CATALOG = [
         "n_layer": 24, "kv": 24 * 8 * 128 * 2, "expert_frac": 0.95, "ctx": 131072,
         "quants": ["MXFP4"], "license": "Apache 2.0",
         "hf": "ggml-org/gpt-oss-20b-GGUF", "role": "20B-class MoE that fits 16 GB RAM",
+    },
+    {
+        # 235B total / 22B active, 128 experts top-8, 94 layers, 4 KV heads x 128.
+        # Routed-expert share solved from 235 = base + E and 22 = base + E/16 -> E ~ 227B.
+        "id": "qwen3-235b-a22b", "family": "Qwen3 MoE", "params_b": 235, "active_b": 22,
+        "n_layer": 94, "kv": 94 * 4 * 256 * 2, "expert_frac": 0.966, "ctx": 32768,
+        "quants": ["Q2_K+Q8_0", "IQ2_XXS"], "license": "Apache 2.0",
+        "hf": "unsloth/Qwen3-235B-A22B-GGUF", "role": "200B-class reference (64 GB+ machines)",
     },
     {
         "id": "llama-4-maverick-17b-128e-instruct", "family": "Meta Llama 4", "params_b": 400, "active_b": 17,
@@ -92,9 +101,17 @@ def specs(ids=None):
         if ids and e["id"] not in ids:
             continue
         for q in e["quants"]:
-            s = ModelSpec.estimate(f'{e["id"]}:{q}', e["params_b"], e["active_b"], BPW[q], e["n_layer"],
-                                   e["kv"], e["expert_frac"], e["ctx"])
-            s.path = f'{e["hf"]}:{q}'
+            if "+" in q:
+                # "Q2_K+Q8_0": routed experts in Q2_K, the rest in Q8_0, made with `pocketllm requant`
+                eq, rq = q.split("+")
+                s = ModelSpec.estimate(f'{e["id"]}:{q}', e["params_b"], e["active_b"], BPW[rq], e["n_layer"],
+                                       e["kv"], e["expert_frac"], e["ctx"], expert_bpw=BPW[eq])
+                s.source = "recipe"
+                s.path = f'{e["id"]}-{eq}-experts.gguf'
+            else:
+                s = ModelSpec.estimate(f'{e["id"]}:{q}', e["params_b"], e["active_b"], BPW[q], e["n_layer"],
+                                       e["kv"], e["expert_frac"], e["ctx"])
+                s.path = f'{e["hf"]}:{q}'
             out.append(s)
     return out
 

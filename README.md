@@ -26,6 +26,18 @@ With slower drives (100 MB/s each, like cheap flash sticks): stock 0.08 tok/s, a
 
 On fast internal storage (about 2 GB/s), the gain shrinks to noise (×0.98–1.6, R5c). PocketLLM pays off when the weights come from slow drives.
 
+### Ideas taken from Pulsar, SwiftLM and ExpertFlow (R8, R9, same lab, 1 drive)
+
+| what (source) | decode | note |
+|---|---|---|
+| PocketLLM v1, Q4_K_M model | 4.15 tok/s | baseline for this table |
+| + `pocketllm requant`: **Q2_K experts + Q8_0 rest** (Pulsar recipe) | **9.34 (×2.3)** | model 3.52 → 2.53 GB |
+| + Q2_K experts + Q4_K rest | **13.76 (×3.3)** | model 2.18 GB |
+| + top-k 4 of 8 experts per token (SwiftLM `SWIFTLM_TOP_K`) | **18.72 (×4.5)** | |
+| own LFU expert cache + router lookahead (Pulsar) | 1.65–3.55 (slower) | kept opt-in, matches SwiftLM's "don't cache experts in app memory" |
+
+Low-bit experts and top-k **change the model's output**. Unlike the streaming engine, they trade quality for speed and size, so a recipe goes on a drive only after `pocketllm qualify` passes on the provisioning station. When weights must be streamed, the planner also quantizes the KV cache to q8_0, following SwiftLM's long-context finding that every KV byte saved becomes page cache for weights. On Apple Silicon, MLX models run through SwiftLM's own `--stream-experts` backend.
+
 The speedup has two sources. First, stock mmap read-around pulls in neighbouring *unused* experts, roughly 3× read amplification. Second, PocketLLM issues all routed-expert reads at once, so they overlap and spread across drives. Outputs are token-identical, because the engine changes only *when* weights are read.
 
 ## Quick start
@@ -45,6 +57,8 @@ python3 -m pocketllm tune models/<model>.gguf    # measured: llama.cpp defaults 
 | `stripe MODEL --drives D1 D2 D3 --link-dir DIR` | split a GGUF across drives for parallel expert reads (llama.cpp split format) |
 | `seal --key K` / `verify --pubkey P [--full]` | sign the drive on the provisioning station / verify before use |
 | `node --host IP` / `cluster MODEL --nodes a:p,b:p --run` | lend a machine's memory / run across machines (llama.cpp RPC) |
+| `requant MODEL --recipe experts-q2 --out OUT` | low-bit routed experts, 8-bit attention: smaller model, fewer bytes streamed per token |
+| `scripts/fetch_python.py DRIVE/PocketLLM` | portable Python on the drive, for computers without one (SHA-256 checked) |
 | `fleet-plan`, `evalset`, `qualify` | provisioning with Meta Model API (refuses to run under an air-gap policy) |
 
 ## Architecture
