@@ -18,6 +18,12 @@ import urllib.request
 EXE = ".exe" if os.name == "nt" else ""
 
 
+def annotate(msg):
+    """Surface details as a GitHub Actions annotation (readable through the API without the log)."""
+    if os.environ.get("GITHUB_ACTIONS"):
+        print("::error::" + msg.replace("%", "%25").replace("\r", "").replace("\n", "%0A")[:4000])
+
+
 def free_port():
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -62,6 +68,7 @@ def main(bin_dir, model):
     print(f"llama-bench exit={p.returncode}  {line or '(no pocket summary)'}")
     if p.returncode != 0 or not m or int(m.group(1)) == 0:
         print(p.stderr[-2000:])
+        annotate(f"llama-bench exit={p.returncode} pocket={line!r}\n" + p.stderr[-1500:])
         ok = False
     else:
         print(f"tg {json.loads(p.stdout)[0]['avg_ts']:.1f} tok/s with the engine on")
@@ -70,6 +77,8 @@ def main(bin_dir, model):
     on = greedy(bin_dir, model, {"POCKET_MOE": "1", "POCKET_MOE_NORA": "1"})
     same = off == on
     print(f"greedy output identical with engine off/on: {same}")
+    if not same or not off:
+        annotate(f"greedy mismatch or empty: off={off[:200]!r} on={on[:200]!r}")
     ok = ok and same and len(off) > 0
     print("ENGINE CHECK", "PASSED" if ok else "FAILED")
     sys.exit(0 if ok else 1)
