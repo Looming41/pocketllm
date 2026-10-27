@@ -40,7 +40,7 @@ python3 -m pocketllm tune <받은 gguf 경로>    # llama.cpp 기본 vs PocketLL
 - **Mac에서 엔진 미실행.** 코드는 macOS 경로(`F_RDADVISE`, `pread` 스레드)를 포함하지만 Mac에서 컴파일하거나 실행해 보지 않았습니다.
 - Metal과 스트리밍을 함께 쓰는 하이브리드(attention은 GPU, 전문가는 스트리밍)는 미검증입니다. 그래서 지금은 CPU 경로로 고정했습니다.
 - Meta Model API 실제 호출, 해커톤 공식 규정 확인(dev.meta.ai가 차단됨)
-- Windows용 엔진 없음(추론은 동작)
+- Windows 엔진: 코드는 추가했고 교차 컴파일도 통과했지만, 실제 Windows 실행은 GitHub Actions(MSVC)에서 확인해야 합니다
 
 ## 5. 실험 수치 출처
 `docs/RESULTS.md`(R1~R7), 원자료 `docs/results/*.json`, 표 재생성은 `python3 scripts/lab_report.py docs/results/*.json`

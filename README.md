@@ -32,6 +32,7 @@ The speedup has two sources. First, stock mmap read-around pulls in neighbouring
 
 ```bash
 scripts/build_llamacpp.sh             # pinned llama.cpp + PocketLLM engine patch + RPC; Metal/CUDA/Vulkan/CPU auto
+# Windows: powershell -ExecutionPolicy Bypass -File scripts\build_llamacpp.ps1   (or download the CI artifact)
 scripts/check_laptop.sh               # hardware report + feasibility table -> data/laptop_report.txt
 python3 -m pocketllm plan -v          # verdict, placement, engine env and llama-server args per model
 python3 -m pocketllm tune models/<model>.gguf    # measured: llama.cpp defaults vs PocketLLM
@@ -61,7 +62,7 @@ USB drive(s)  ── storage + read bandwidth only ──▶  host laptop (does 
 
 ## Status and honest limits
 - Every number above comes from an emulated low-RAM machine with throttled loop devices standing in for USB drives, running a **random-weight** MoE model. The model's routing statistics differ from real models, so prediction and pinning still need testing on real models such as Qwen3-30B-A3B and Llama 4 Scout. **No real model has been run yet** because model downloads were blocked in the build environment.
-- The engine is tested on Linux. The macOS path (`F_RDADVISE`, or `POCKET_MOE_IO_THREADS`) compiles from the same code but **has not been run on a Mac yet**. Windows has no streaming engine yet; inference works there without it.
+- The engine runs on Linux (tested here). The macOS path (`F_RDADVISE`, or `POCKET_MOE_IO_THREADS`) and the Windows path (`PrefetchVirtualMemory` + `VirtualLock`) cross-compile cleanly (zig cc, `-Wall -Wextra`). They are built and tested natively, with MSVC on Windows, by the GitHub Actions workflow (`.github/workflows/ci.yml`), which also uploads per-OS binaries for the drive. Windows has no equivalent of `MADV_RANDOM`, so the read-around fix does not apply there.
 - llama.cpp RPC has no authentication or encryption. Use it only on a dedicated link.
 - This is not a security-certified product.
 

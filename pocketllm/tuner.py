@@ -6,6 +6,7 @@ default vs. tuned on the same model, prompt length and hardware.
 """
 from __future__ import annotations
 
+import ctypes
 import json
 import os
 import platform
@@ -16,7 +17,37 @@ import time
 from . import runtime
 
 
+class _IO_COUNTERS(ctypes.Structure):
+    _fields_ = [(n, ctypes.c_ulonglong) for n in ("ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
+                                                    "ReadTransferCount", "WriteTransferCount", "OtherTransferCount")]
+
+
+class _PMC(ctypes.Structure):
+    _fields_ = [("cb", ctypes.c_ulong), ("PageFaultCount", ctypes.c_ulong)] + \
+               [(n, ctypes.c_size_t) for n in ("PeakWorkingSetSize", "WorkingSetSize", "QuotaPeakPagedPoolUsage",
+                                               "QuotaPagedPoolUsage", "QuotaPeakNonPagedPoolUsage",
+                                               "QuotaNonPagedPoolUsage", "PagefileUsage", "PeakPagefileUsage")]
+
+
+def _win_process(pid):
+    k32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ = 0x1000, 0x0010
+    return k32, k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, False, int(pid))
+
+
 def _rss_bytes(pid):
+    if platform.system() == "Windows":
+        try:
+            k32, h = _win_process(pid)
+            if not h:
+                return None
+            pmc = _PMC()
+            pmc.cb = ctypes.sizeof(_PMC)
+            ok = ctypes.windll.psapi.GetProcessMemoryInfo(h, ctypes.byref(pmc), pmc.cb)  # type: ignore[attr-defined]
+            k32.CloseHandle(h)
+            return int(pmc.WorkingSetSize) if ok else None
+        except (OSError, AttributeError):
+            return None
     if platform.system() == "Linux":
         try:
             for line in open(f"/proc/{pid}/status"):
@@ -43,9 +74,21 @@ def read_bytes(pid):
                         return int(line.split()[1])
         except OSError:
             return None
+    elif system == "Windows":
+        # ReadTransferCount counts read I/O issued by the process; whether paging reads of
+        # memory-mapped files are included is not verified, so treat it as indicative only
+        try:
+            k32, h = _win_process(pid)
+            if not h:
+                return None
+            c = _IO_COUNTERS()
+            ok = k32.GetProcessIoCounters(h, ctypes.byref(c))
+            k32.CloseHandle(h)
+            return int(c.ReadTransferCount) if ok else None
+        except (OSError, AttributeError):
+            return None
     elif system == "Darwin":
         try:
-            import ctypes
             lib = ctypes.CDLL("/usr/lib/libproc.dylib")
             buf = (ctypes.c_uint64 * 40)()
             if lib.proc_pid_rusage(int(pid), 2, ctypes.byref(buf)) == 0:

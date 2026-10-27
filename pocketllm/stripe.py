@@ -133,5 +133,8 @@ def stripe(src: str, drive_dirs: list, link_dir: str, progress=print) -> list:
             link = os.path.join(link_dir, names[i])
             if os.path.lexists(link):
                 os.remove(link)
-            os.symlink(os.path.abspath(out_path), link)
+            try:
+                os.symlink(os.path.abspath(out_path), link)
+            except OSError:
+                progress(f"  (could not create {link}; PocketLLM will find the parts on the drives at launch)")
     return os.path.join(link_dir, names[0])

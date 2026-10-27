@@ -29,7 +29,7 @@ def local_specs(models_root=None) -> list:
     for path in gguf.find_models(models_root or runtime.models_dir()):
         r = drives.resolve(path)   # parts may be striped over several USB drives
         if r["path"] is None:
-            INCOMPLETE.append({"model": os.path.basename(path), "missing_parts": r["missing"]})
+            INCOMPLETE.append({"model": os.path.basename(path), "missing_parts": r["missing"] or [r.get("error", "?")]})
             continue
         try:
             specs.append(planner.ModelSpec.from_gguf(gguf.load(r["path"]), r["path"]))

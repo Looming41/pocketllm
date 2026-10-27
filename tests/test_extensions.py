@@ -121,6 +121,16 @@ class TestSecurity(unittest.TestCase):
         self.assertFalse(r["signature"])
         self.assertFalse(r["ok"])
 
+    def test_signed_drive_fails_closed_without_openssl(self):
+        real = security.shutil.which
+        security.shutil.which = lambda name: None if name == "openssl" else real(name)
+        try:
+            r = security.verify(self.root, "quick", self.pub)
+        finally:
+            security.shutil.which = real
+        self.assertFalse(r["ok"])
+        self.assertIn("openssl", r["error"])
+
     def test_wrong_org_key_rejected(self):
         other = os.path.join(self.d, "other.pem")
         subprocess.run(["openssl", "genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048", "-out", other],

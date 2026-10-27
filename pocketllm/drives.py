@@ -63,10 +63,16 @@ def resolve(first_part: str) -> dict:
         return {"path": found[names[0]], "missing": [], "parts": [found[n] for n in names]}
     link_dir = os.path.join(runtime.data_dir(), "links", stem)
     os.makedirs(link_dir, exist_ok=True)
-    for n in names:
-        link = os.path.join(link_dir, n)
-        if os.path.lexists(link):
-            os.remove(link)
-        os.symlink(found[n], link)
+    try:
+        for n in names:
+            link = os.path.join(link_dir, n)
+            if os.path.lexists(link):
+                os.remove(link)
+            os.symlink(found[n], link)
+    except OSError as e:
+        # Windows needs Developer Mode (or admin) for symlinks
+        return {"path": None, "missing": [], "parts": [found[n] for n in names],
+                "error": f"cannot link parts across drives ({e}); on Windows enable Developer Mode, "
+                         "or copy all parts into one models folder"}
     return {"path": os.path.join(link_dir, names[0]), "missing": [], "parts": [found[n] for n in names],
             "drives": sorted({os.path.dirname(p) for p in found.values()})}

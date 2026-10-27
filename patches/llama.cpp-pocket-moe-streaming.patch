@@ -87,10 +87,10 @@ index 53d39d2..7232079 100644
      // reset current_chunk
 diff --git a/ggml/src/ggml-pocket.c b/ggml/src/ggml-pocket.c
 new file mode 100644
-index 0000000..31a5508
+index 0000000..642c592
 --- /dev/null
 +++ b/ggml/src/ggml-pocket.c
-@@ -0,0 +1,504 @@
+@@ -0,0 +1,571 @@
 +// PocketLLM expert streaming - see ggml/include/ggml-pocket.h for the design.
 +#define _GNU_SOURCE
 +#include "ggml-pocket.h"
@@ -100,20 +100,70 @@ index 0000000..31a5508
 +#include <stdlib.h>
 +#include <string.h>
 +
++// ---- portability layer -------------------------------------------------------------
++// POSIX (Linux, macOS): read-ahead through the file descriptor (posix_fadvise / F_RDADVISE)
++// or pread() worker threads; mlock for pinning; madvise(MADV_RANDOM) to stop read-around.
++// Windows: PrefetchVirtualMemory on the mapped address range (Windows 8+, looked up at run
++// time like llama.cpp does); VirtualLock for pinning; no read-around control.
 +#if defined(_WIN32)
-+
-+void ggml_pocket_register_mapping(const void * addr, size_t size, int fd) { (void) addr; (void) size; (void) fd; }
-+void ggml_pocket_moe_hook(const struct ggml_tensor * w, const int64_t * counts, int64_t n_expert, int64_t n_tokens) {
-+    (void) w; (void) counts; (void) n_expert; (void) n_tokens;
++#ifndef WIN32_LEAN_AND_MEAN
++#define WIN32_LEAN_AND_MEAN
++#endif
++#ifndef NOMINMAX
++#define NOMINMAX
++#endif
++#include <windows.h>
++typedef SRWLOCK pk_mutex;
++#define PK_MUTEX_INIT SRWLOCK_INIT
++static void pk_lock(pk_mutex * m)   { AcquireSRWLockExclusive(m); }
++static void pk_unlock(pk_mutex * m) { ReleaseSRWLockExclusive(m); }
++typedef struct { void * addr; SIZE_T size; } pk_range;   // = WIN32_MEMORY_RANGE_ENTRY
++typedef BOOL (WINAPI * pk_prefetch_fn)(HANDLE, ULONG_PTR, pk_range *, ULONG);
++static size_t pk_page_size(void) {
++    SYSTEM_INFO si;
++    GetSystemInfo(&si);
++    return si.dwPageSize;
 +}
-+bool ggml_pocket_enabled(void) { return false; }
-+
 +#else
-+
 +#include <fcntl.h>
 +#include <pthread.h>
 +#include <sys/mman.h>
 +#include <unistd.h>
++typedef pthread_mutex_t pk_mutex;
++#define PK_MUTEX_INIT PTHREAD_MUTEX_INITIALIZER
++static void pk_lock(pk_mutex * m)   { pthread_mutex_lock(m); }
++static void pk_unlock(pk_mutex * m) { pthread_mutex_unlock(m); }
++static size_t pk_page_size(void) { return (size_t) sysconf(_SC_PAGESIZE); }
++#endif
++
++// page-align [p, p + n) outward
++static void * pk_align(const void * p, size_t n, size_t * len) {
++    size_t ps = pk_page_size();
++    uintptr_t b = (uintptr_t) p & ~(uintptr_t) (ps - 1);
++    *len = n + ((uintptr_t) p - b);
++    return (void *) b;
++}
++
++// stop fault read-around on a range (POSIX only; Windows has no equivalent)
++static void pk_no_readaround(const void * p, size_t n) {
++#if defined(_WIN32)
++    (void) p; (void) n;
++#else
++    size_t len;
++    void * b = pk_align(p, n, &len);
++    madvise(b, len, MADV_RANDOM);
++#endif
++}
++
++static int pk_lock_pages(const void * p, size_t n, int on) {
++    size_t len;
++    void * b = pk_align(p, n, &len);
++#if defined(_WIN32)
++    return on ? (VirtualLock(b, len) ? 0 : -1) : (VirtualUnlock(b, len) ? 0 : -1);
++#else
++    return on ? mlock(b, len) : munlock(b, len);
++#endif
++}
 +
 +#define PK_MAX_MAPS   64
 +#define PK_MAX_LAYERS 512
@@ -144,7 +194,7 @@ index 0000000..31a5508
 +    size_t pin_bytes;
 +    char   stats_path[1024];
 +
-+    pthread_mutex_t lock;
++    pk_mutex        lock;
 +    struct pk_map   maps[PK_MAX_MAPS];
 +    int             n_maps;
 +    struct pk_layer layers[PK_MAX_LAYERS];
@@ -156,7 +206,7 @@ index 0000000..31a5508
 +    uint64_t pred_hits, pred_total;
 +    size_t   pinned_bytes;
 +    int      stats_loaded;
-+} pk = { .lock = PTHREAD_MUTEX_INITIALIZER, .cur_layer = -1 };
++} pk = { .lock = PK_MUTEX_INIT, .cur_layer = -1 };
 +
 +static void pk_save_stats(void);
 +
@@ -194,24 +244,29 @@ index 0000000..31a5508
 +
 +void ggml_pocket_register_mapping(const void * addr, size_t size, int fd) {
 +    pk_init();
-+    if (!addr || fd < 0) {
++    if (!addr) {
 +        return;
 +    }
 +    if (pk.no_readaround == 2) {
 +        // whole mapping: no fault read-around anywhere (also hurts dense weights - diagnostic only)
-+        madvise((void *) addr, size, MADV_RANDOM);
++        pk_no_readaround(addr, size);
 +    }
 +    if (!pk.enabled) {
 +        return;
 +    }
-+    pthread_mutex_lock(&pk.lock);
++    pk_lock(&pk.lock);
 +    if (pk.n_maps < PK_MAX_MAPS) {
-+        int own = dup(fd);  // keep our own descriptor: the loader may close its file
++#if defined(_WIN32)
++        (void) fd;  // Windows prefetches by address range, no descriptor needed
++        pk.maps[pk.n_maps++] = (struct pk_map) { (const char *) addr, size, -1 };
++#else
++        int own = fd >= 0 ? dup(fd) : -1;  // keep our own descriptor: the loader may close its file
 +        if (own >= 0) {
 +            pk.maps[pk.n_maps++] = (struct pk_map) { (const char *) addr, size, own };
 +        }
++#endif
 +    }
-+    pthread_mutex_unlock(&pk.lock);
++    pk_unlock(&pk.lock);
 +}
 +
 +static int pk_find_map(const void * p) {
@@ -224,8 +279,9 @@ index 0000000..31a5508
 +    return -1;
 +}
 +
++#if !defined(_WIN32)
 +// ---- optional I/O worker pool: blocking pread() into a scratch buffer fills the page cache.
-+// Portable fallback for systems where read-ahead advice is weak (POCKET_MOE_IO_THREADS=N).
++// Fallback for systems where read-ahead advice is weak (POCKET_MOE_IO_THREADS=N; POSIX only).
 +#define PK_QCAP 4096
 +static struct {
 +    pthread_mutex_t mu;
@@ -269,6 +325,7 @@ index 0000000..31a5508
 +    pthread_mutex_unlock(&io.mu);
 +    return ok;
 +}
++#endif
 +
 +// async read-ahead of [p, p + n) from the file behind mapping m
 +static void pk_advise(int m, const char * p, size_t n) {
@@ -276,6 +333,26 @@ index 0000000..31a5508
 +        return;
 +    }
 +    const struct pk_map * mp = &pk.maps[m];
++#if defined(_WIN32)
++    (void) mp;
++    static pk_prefetch_fn prefetch = NULL;
++    static int looked_up = 0;
++    if (!looked_up) {
++        looked_up = 1;
++        prefetch = (pk_prefetch_fn) (void *) GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "PrefetchVirtualMemory");
++        if (!prefetch && pk.verbose) {
++            fprintf(stderr, "pocket: PrefetchVirtualMemory unavailable (Windows 8+ needed), prefetch disabled\n");
++        }
++    }
++    if (!prefetch) {
++        return;
++    }
++    size_t len;
++    pk_range r;
++    r.addr = pk_align(p, n, &len);
++    r.size = len;
++    prefetch(GetCurrentProcess(), 1, &r, 0);
++#else
 +    off_t off = (off_t) (p - mp->base);
 +    if (pk.io_threads > 0) {
 +        pk_io_submit(mp->fd, off, n);
@@ -289,9 +366,10 @@ index 0000000..31a5508
 +#elif defined(POSIX_FADV_WILLNEED)
 +    posix_fadvise(mp->fd, off, (off_t) n, POSIX_FADV_WILLNEED);
 +#else
-+    long ps = sysconf(_SC_PAGESIZE);
-+    uintptr_t b = (uintptr_t) p & ~(uintptr_t) (ps - 1);
-+    madvise((void *) b, n + ((uintptr_t) p - b), MADV_WILLNEED);
++    size_t len;
++    void * b = pk_align(p, n, &len);
++    madvise(b, len, MADV_WILLNEED);
++#endif
 +#endif
 +    pk.advise_calls++;
 +    pk.advise_bytes += n;
@@ -320,16 +398,9 @@ index 0000000..31a5508
 +        if (!L->data[k] || L->map[k] < 0) {
 +            continue;
 +        }
-+        long ps = sysconf(_SC_PAGESIZE);
 +        const char * p = L->data[k] + (size_t) e * L->nb2[k];
-+        uintptr_t b = (uintptr_t) p & ~(uintptr_t) (ps - 1);
-+        size_t n = L->nb2[k] + ((uintptr_t) p - b);
-+        if (on) {
-+            if (mlock((void *) b, n) != 0 && pk.verbose) {
-+                perror("pocket: mlock");
-+            }
-+        } else {
-+            munlock((void *) b, n);
++        if (pk_lock_pages(p, L->nb2[k], on) != 0 && on && pk.verbose) {
++            fprintf(stderr, "pocket: could not pin expert %d (memory lock limit?)\n", e);
 +        }
 +    }
 +}
@@ -489,7 +560,7 @@ index 0000000..31a5508
 +    if (kind < 0) {
 +        return;
 +    }
-+    pthread_mutex_lock(&pk.lock);
++    pk_lock(&pk.lock);
 +    struct pk_layer * L = &pk.layers[l];
 +    pk_ensure_layer(L, n_expert);
 +    if (!L->data[kind]) {
@@ -499,15 +570,13 @@ index 0000000..31a5508
 +        if (pk.no_readaround == 1 && L->map[kind] >= 0) {
 +            // expert access is sparse: stop fault read-around from pulling in neighbouring
 +            // (unused) experts, but keep normal read-ahead for the dense weights
-+            long ps = sysconf(_SC_PAGESIZE);
-+            uintptr_t b = (uintptr_t) w->data & ~(uintptr_t) (ps - 1);
-+            madvise((void *) b, ggml_nbytes(w) + ((uintptr_t) w->data - b), MADV_RANDOM);
++            pk_no_readaround(w->data, ggml_nbytes(w));
 +        }
 +    }
 +    if (l > pk.max_layer) pk.max_layer = l;
 +
 +    if (l == pk.cur_layer) {          // second/third projection of the same layer: already handled
-+        pthread_mutex_unlock(&pk.lock);
++        pk_unlock(&pk.lock);
 +        return;
 +    }
 +    const int decode = n_tokens == 1;
@@ -591,10 +660,8 @@ index 0000000..31a5508
 +            free(score);
 +        }
 +    }
-+    pthread_mutex_unlock(&pk.lock);
++    pk_unlock(&pk.lock);
 +}
-+
-+#endif
 diff --git a/src/llama-model-loader.cpp b/src/llama-model-loader.cpp
 index a963f24..c7f0cc5 100644
 --- a/src/llama-model-loader.cpp

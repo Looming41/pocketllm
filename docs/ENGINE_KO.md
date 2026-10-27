@@ -18,6 +18,8 @@ llama.cpp CPU 백엔드의 `MUL_MAT_ID`(MoE 행렬곱)에서 **스레드 0이 �
 | I/O 스레드 | 힌트 대신 N개 스레드가 `pread`로 페이지 캐시를 채움 | `POCKET_MOE_IO_THREADS=N` | 0 |
 | 멀티 파일·드라이브 | 매핑마다 별도 fd → 여러 드라이브에 나뉜 분할 파일을 동시에 읽음 | (자동) | — |
 
+**OS별 구현:** Linux는 `posix_fadvise(WILLNEED)`와 `madvise(MADV_RANDOM)`, `mlock`을 씁니다. macOS는 `fcntl(F_RDADVISE)`(또는 `pread` 스레드)를 씁니다. Windows는 `PrefetchVirtualMemory`(Windows 8 이상, 실행 시점에 찾아 씀)와 `VirtualLock`을 쓰며, read-around 제어에 해당하는 기능은 없습니다. 세 OS 모두 zig로 교차 컴파일했을 때 경고가 없었고, 네이티브 빌드와 테스트는 GitHub Actions에서 합니다.
+
 - **변경 범위:** llama.cpp 5개 파일, 약 500줄(`patches/llama.cpp-pocket-moe-streaming.patch`). 계산 커널은 llama.cpp 것을 그대로 씁니다. 그래서 **결과 토큰은 동일**합니다(엔진은 읽는 시점만 바꿈).
 - **멀티 드라이브 분할:** `pocketllm stripe`가 전문가 텐서를 gate→드라이브0, up→드라이브1, down→드라이브2 식으로 돌려 담고, llama.cpp 표준 분할 형식과 심볼릭 링크로 묶습니다. 분할본이 원본과 같은 출력을 내는 것을 검증했습니다.
 

@@ -196,7 +196,12 @@ def verify(root: str, mode: str = "quick", trusted_pubkey: str | None = None) ->
         res["error"] = "no manifest on drive (run `pocketllm seal` on the provisioning station)"
         return res
     pub = trusted_pubkey or os.path.join(root, PUBKEY)
-    if os.path.exists(sig) and os.path.exists(pub) and shutil.which("openssl"):
+    if os.path.exists(sig) and not shutil.which("openssl"):
+        # a signed drive whose signature cannot be checked must not pass (e.g. Windows without OpenSSL)
+        res["signature"] = False
+        res["error"] = "cannot verify the drive signature: openssl not found (install it, e.g. with Git for Windows)"
+        return res
+    if os.path.exists(sig) and os.path.exists(pub):
         r = subprocess.run(["openssl", "dgst", "-sha256", "-verify", pub, "-signature", sig, mpath],
                            capture_output=True, text=True)
         res["signature"] = r.returncode == 0
