@@ -75,6 +75,8 @@ label.toggle{display:flex;gap:6px;align-items:center;font-size:12px;color:var(--
       <div class="row" style="margin-top:8px"><input type="text" id="prompt" placeholder="Ask the local model…"><button class="primary" id="send">Send</button></div>
       <label class="toggle">Power profile for the next load:
         <select id="power"><option value="">auto (thermal)</option><option value="cool">cool (fanless laptops)</option><option value="balanced">balanced</option><option value="max">max</option></select></label>
+      <label class="toggle">MoE experts per token:
+        <select id="experts"><option value="">model default (exact quality)</option><option value="fewer">fewer: faster, slightly lower quality</option></select></label>
       <p class="small" id="runinfo"></p>
     </section>
     <section>
@@ -129,7 +131,7 @@ async function refresh(){
 }
 async function load(path){
   $("runinfo").textContent = "loading model…";
-  const r = await api("/api/load", {path, ctx:4096, power: $("power").value || null});
+  const r = await api("/api/load", {path, ctx:4096, power: $("power").value || null, experts: $("experts").value || null});
   if (r.error){ $("runinfo").textContent = r.error; return; }
   loadedPath = path;
 }
@@ -157,7 +159,7 @@ async function poll(){
     }
     $("b-thermal").textContent = `thermal: ${s.thermal.level} → ${s.thermal.suggested}`;
     $("b-thermal").className = "badge " + (["serious","critical"].includes(s.thermal.level) ? "bad" : "");
-    if (L && !s.loading) $("runinfo").textContent = L.ok ? `loaded in ${L.load_s}s · power ${L.power} · llama-server ${L.args.join(" ")}${Object.keys(L.env || {}).length ? " · engine: " + Object.entries(L.env).map(([k,v]) => k + "=" + v).join(" ") : ""}` : `failed to start: ${(s.llama.history.at(-1) || {}).error || ""}`;
+    if (L && !s.loading) $("runinfo").textContent = L.ok ? `loaded in ${L.load_s}s · power ${L.power}${L.topk ? " · top-" + L.topk + " experts" : ""} · llama-server ${L.args.join(" ")}${Object.keys(L.env || {}).length ? " · engine: " + Object.entries(L.env).map(([k,v]) => k + "=" + v).join(" ") : ""}` : `failed to start: ${(s.llama.history.at(-1) || {}).error || ""}`;
   }catch(e){}
 }
 async function ask(){

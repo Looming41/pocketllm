@@ -45,6 +45,7 @@ class ModelSpec:
     train_ctx: int = 0
     path: str | None = None
     source: str = "gguf"             # "gguf" (exact), "estimate" (catalog), "recipe" (catalog, made by requant), "mlx"
+    n_expert_used: int = 0           # routed experts per token (MoE)
 
     @classmethod
     def from_gguf(cls, m, path=None):
@@ -55,7 +56,7 @@ class ModelSpec:
             layer_expert_bytes=[m.layer_bytes(i, experts=True) for i in range(n)],
             non_layer_bytes=m.non_layer_bytes(), active_bytes=m.active_bytes_per_token(),
             kv_bytes_per_token=m.kv_bytes_per_token(), is_moe=m.is_moe, train_ctx=m.context_length,
-            path=path or m.paths[0], source="gguf",
+            path=path or m.paths[0], source="gguf", n_expert_used=m.n_expert_used if m.is_moe else 0,
         )
 
     @classmethod
@@ -195,6 +196,7 @@ def plan(spec: ModelSpec, b: Budget, ctx: int = 4096, allow_paging: bool = True,
         return p
     if spec.train_ctx:
         ctx = min(ctx, spec.train_ctx)
+    n_expert_used = n_expert_used or spec.n_expert_used
     if topk and n_expert_used and spec.is_moe and topk < n_expert_used:
         experts = sum(spec.layer_expert_bytes)
         routed_active = max(0, spec.active_bytes - (spec.total_bytes - experts))

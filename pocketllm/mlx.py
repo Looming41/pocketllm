@@ -81,4 +81,5 @@ def load_spec(path: str) -> ModelSpec:
     return ModelSpec(name=os.path.basename(path.rstrip("/")), total_bytes=total, n_layer=n_layer,
                      layer_dense_bytes=per_layer_dense, layer_expert_bytes=per_layer_exp, non_layer_bytes=non_layer,
                      active_bytes=active, kv_bytes_per_token=n_layer * n_kv * head_dim * 2 * 2, is_moe=moe,
-                     train_ctx=int(tc.get("max_position_embeddings", 0) or 0), path=path, source="mlx")
+                     train_ctx=int(tc.get("max_position_embeddings", 0) or 0), path=path, source="mlx",
+                     n_expert_used=n_used if moe else 0)

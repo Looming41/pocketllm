@@ -173,13 +173,17 @@ def make_handler(st: State):
                 else:
                     return self._json({"error": "model file not found on drive; download it first"}, 400)
                 prof = st.get_profile()
-                pl = planner.plan(spec, core.budget(prof), ctx=int(b.get("ctx", 4096)))
+                topk = None
+                if b.get("experts") == "fewer" and spec.n_expert_used > 1:
+                    # SwiftLM-style top-k reduction: half the routed experts per token (min 2)
+                    topk = max(2, spec.n_expert_used // 2) if spec.n_expert_used >= 4 else spec.n_expert_used - 1
+                pl = planner.plan(spec, core.budget(prof), ctx=int(b.get("ctx", 4096)), topk=topk)
                 if pl.verdict == "does_not_fit":
                     return self._json({"error": "does not fit", "plan": pl.to_dict()}, 400)
                 power = b.get("power") or thermal.auto_profile(thermal.thermal_state())
                 if "-t" in pl.args:
                     pl.args[pl.args.index("-t") + 1] = str(thermal.threads_for(power, prof["cpu"]))
-                st.audit.write("load", model=spec.name, strategy=pl.strategy, power=power)
+                st.audit.write("load", model=spec.name, strategy=pl.strategy, power=power, topk=pl.topk)
 
                 def load():
                     st.loading = True
@@ -188,7 +192,7 @@ def make_handler(st: State):
                     st.loading = False
                     st.loaded = {"name": spec.name, "path": path, "files": files, "plan": pl.to_dict(),
                                  "ok": ok, "load_s": round(time.time() - t0, 1), "args": st.llama.args,
-                                 "env": st.llama.env, "power": power}
+                                 "env": st.llama.env, "power": power, "topk": pl.topk}
                 threading.Thread(target=load, daemon=True).start()
                 self._json({"started": True, "plan": pl.to_dict()})
             elif self.path == "/api/unload":
