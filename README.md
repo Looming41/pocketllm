@@ -34,6 +34,8 @@ On fast internal storage (about 2 GB/s), the gain shrinks to noise (×0.98–1.6
 | PocketLLM v1 | 0.63 (×7.5) | 0.66 |
 | **PocketLLM v2 (own expert cache)** | **0.82 (×9.6)** | **1.04 (×8.7)** |
 
+Second run (R14), 1 drive: v2 + top-k 4 reaches **1.61 tok/s**. The model requantized to Q2_K experts + Q8_0 (18.6 → 11.2 GB) gives v2 2.01 and v2 + top-k 4 **3.51 tok/s**, about ×44 over stock llama.cpp. The quality cost of those last two steps is not measured yet.
+
 On a real router, the v2 cache hits 64% of expert lookups, so it beats v1. On random-weight models it lost, which is why the default is now chosen by drive speed. On a fast unthrottled disk, v1 is ×1.21 over stock and v2 is slower (R13).
 
 ### Ideas taken from Pulsar, SwiftLM and ExpertFlow (R8, R9, same lab, 1 drive)

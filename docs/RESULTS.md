@@ -181,4 +181,27 @@ On fast storage, v2's copies cost more than they save.
 
 **Planner change:** for MoE models that must be streamed, the planner turns on the v2 cache (`POCKET_MOE_CACHE_MIB` = RAM left after dense weights and KV, minus 768 MiB) when the measured drive speed is below 1 GB/s. Otherwise it keeps v1. That threshold rests on this one model, one OS and two drive speeds. `pocketllm ab` measures stock, v1 and v2 on the user's own machine. Windows has no v2 yet and falls back to v1.
 
+### R14: real model, second run: top-k, warm start, requantized experts (CI run 40524656606)
+Same setup as R12 (6 GiB, 300 MB/s drives, 16 tokens, 2 cold runs). `docs/results/real_qwen3_30b_usb_lab_run2.json`, `real_qwen3_30b_requant_E2R8.json`.
+
+| config | 1 drive | 2 drives |
+|---|---|---|
+| v1 | 0.70 ± 0.00 | 0.63 ± 0.13 |
+| v2 cache (planner default on slow drives) | 0.76 ± 0.03 | 1.03 ± 0.02 |
+| v1 + warm start (census) | 0.65 ± 0.00 | 0.74 ± 0.04 |
+| **v2 + top-k 4 of 8** | **1.61 ± 0.02** | **2.22 ± 0.07** |
+
+The same model requantized to **Q2_K experts + Q8_0 rest** (`pocketllm requant`, 18.56 → 11.19 GB, from the Q4_K_M file):
+
+| config (1 drive) | tok/s |
+|---|---|
+| v1 | 1.82 ± 0.60 |
+| v2 cache | 2.01 ± 0.14 |
+| **v2 + top-k 4** | **3.51 ± 0.01** |
+
+* The v2 result repeats R12. With 2 drives it is 1.03 here against 1.04 there. With 1 drive the margin over v1 is smaller this time (0.76 against 0.70).
+* Warm start gives no clear gain even on a real router. It stays off.
+* From stock llama.cpp (0.08 tok/s, R12) to Q2 experts + v2 + top-k 4 (3.51 tok/s) is about **×44** on one 300 MB/s drive. The last two steps trade quality for speed, and that loss **is not measured yet**: the requant came from a Q4 file, and no eval was run. Measuring it is the next step (`pocketllm qualify` on the provisioning station).
+* Fast disk A/B, second run: stock 3.43, v1 4.76 (×1.39), v2 1.90 (×0.55). This confirms R13: no v2 on fast storage.
+
 ## Environment E1: target laptop. **TODO** (run `scripts/check_laptop.sh`, then `docs/TEST_PLAN_BIG_MODEL_KO.md`)
