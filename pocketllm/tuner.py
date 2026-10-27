@@ -137,6 +137,9 @@ def run_bench(model_path, cfg: dict, n_prompt=128, n_gen=64, reps=2, timeout=900
     res = {"config": cfg, "ok": proc.returncode == 0, "wall_s": round(time.perf_counter() - t0, 1),
            "peak_rss_gb": round(peak[0] / 1e9, 2) if peak[0] else None,
            "storage_read_gb": round(io[0] / 1e9, 2) if io[0] is not None else None}
+    pocket = [l for l in err.splitlines() if l.startswith(("pocket: tokens=", "pocket: v2", "pocket: memory"))]
+    if pocket:
+        res["pocket"] = " | ".join(pocket)
     if proc.returncode != 0:
         res["error"] = (err.strip().splitlines() or ["unknown error"])[-1][:300]
         return res
@@ -230,6 +233,9 @@ STREAM_ENV = {"POCKET_MOE": "1", "POCKET_MOE_NORA": "1"}
 def evict_cache(model_path) -> bool:
     """Drop the model's pages from the OS cache (Linux, no root needed). Returns False where
     that is not possible (macOS needs `sudo purge`), so results there may start warm."""
+    if platform.system() == "Darwin" and os.environ.get("POCKET_PURGE") == "1":
+        # macOS has no per-file eviction; `purge` empties the whole cache (needs sudo; CI runners have it)
+        return subprocess.run(["sudo", "-n", "purge"], capture_output=True).returncode == 0
     if not hasattr(os, "posix_fadvise"):
         return False
     from . import gguf
@@ -246,19 +252,33 @@ def evict_cache(model_path) -> bool:
     return ok
 
 
-def ab_compare(model_path, plan: dict, profile: dict, n_gen=16, log=print):
-    """Quick demo comparison on the same model and settings: stock llama.cpp vs the PocketLLM engine."""
+def v2_cache_mib(available_bytes: int, dense_bytes: int, margin_mib: int = 768) -> int:
+    """v2 expert-cache size: what is left after the always-used (dense) weights and a margin."""
+    return max(256, int((available_bytes - dense_bytes) / 2**20) - margin_mib)
+
+
+def ab_compare(model_path, plan: dict, profile: dict, n_gen=16, log=print, cache_mib=None, dense_bytes=0):
+    """Same model and settings: stock llama.cpp vs the PocketLLM engine (v1 prefetch, v2 own cache)."""
     cpu = profile.get("cpu", {})
     threads = cpu.get("physical_cores") or cpu.get("logical_cores") or 4
     cfg = {"threads": threads, "load_mode": "mmap", "repack": 0,
            "ngl": plan.get("n_gpu_layers", 0) if profile.get("gpus") else 0}
-    out = {"cold_start": evict_cache(model_path)}
-    for label, env in (("stock llama.cpp", {}), ("PocketLLM engine", plan.get("env") or STREAM_ENV)):
+    if cache_mib is None:
+        avail = (profile.get("ram") or {}).get("available_bytes") or 0
+        cache_mib = v2_cache_mib(avail, dense_bytes)
+    v2 = dict(STREAM_ENV, POCKET_MOE_CACHE_MIB=str(cache_mib), POCKET_MOE_LOOKAHEAD="1")
+    out = {"cold_start": evict_cache(model_path), "cache_mib": cache_mib}
+    configs = [("stock llama.cpp", {}), ("PocketLLM engine", plan.get("env") or STREAM_ENV)]
+    if platform.system() != "Windows":
+        configs.append(("PocketLLM engine v2", v2))
+    for label, env in configs:
         evict_cache(model_path)   # both runs start from the drive, not from the other run's page cache
-        r = run_bench(model_path, dict(cfg), n_prompt=0, n_gen=n_gen, reps=1, env=env)
+        r = run_bench(model_path, dict(cfg), n_prompt=0, n_gen=n_gen, reps=1, env=dict(env, POCKET_MOE_VERBOSE="1"))
         r["label"] = label
         out[label] = r
         log(f"  {label:18} {r.get('tg_tok_s', 'fail')} tok/s, read {r.get('storage_read_gb')} GB from storage")
     a, b = out["stock llama.cpp"].get("tg_tok_s"), out["PocketLLM engine"].get("tg_tok_s")
     out["speedup"] = round(b / a, 2) if a and b else None
+    c = (out.get("PocketLLM engine v2") or {}).get("tg_tok_s")
+    out["speedup_v2"] = round(c / a, 2) if a and c else None
     return out

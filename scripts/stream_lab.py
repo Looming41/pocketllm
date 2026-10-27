@@ -26,6 +26,9 @@ from pocketllm import stripe  # noqa: E402
 
 CG_MEM = "/sys/fs/cgroup/memory/pocketlab"
 CG_BLK = "/sys/fs/cgroup/blkio/pocketlab"
+CG_V2 = "/sys/fs/cgroup/pocketlab"
+# cgroup v1 (separate memory/blkio hierarchies) or v2 (unified, e.g. GitHub runners)
+V2 = not os.path.isdir("/sys/fs/cgroup/memory") and os.path.exists("/sys/fs/cgroup/cgroup.controllers")
 
 
 def sh(*cmd, check=True):
@@ -54,6 +57,20 @@ def drop_drive(d):
 
 
 def setup_cgroups(mem_mib, drives, mbps):
+    if V2:
+        try:
+            open("/sys/fs/cgroup/cgroup.subtree_control", "w").write("+memory +io")
+        except OSError:
+            pass
+        os.makedirs(CG_V2, exist_ok=True)
+        open(f"{CG_V2}/memory.max", "w").write(str(mem_mib << 20))
+        try:
+            open(f"{CG_V2}/memory.swap.max", "w").write("0")
+        except OSError:
+            pass
+        for d in drives:
+            open(f"{CG_V2}/io.max", "w").write(f"{d['majmin']} rbps={mbps * 1_000_000}")
+        return
     os.makedirs(CG_MEM, exist_ok=True)
     os.makedirs(CG_BLK, exist_ok=True)
     open(f"{CG_MEM}/memory.limit_in_bytes", "w").write(str(mem_mib << 20))
@@ -76,12 +93,23 @@ def flush_cache(files=()):
     except OSError:
         pass
     try:
-        open(f"{CG_MEM}/memory.force_empty", "w").write("0")
+        if not V2:
+            open(f"{CG_MEM}/memory.force_empty", "w").write("0")
     except OSError:
         pass
 
 
 def blk_read_bytes():
+    if V2:
+        try:
+            total = 0
+            for line in open(f"{CG_V2}/io.stat"):
+                for kv in line.split()[1:]:
+                    if kv.startswith("rbytes="):
+                        total += int(kv.split("=")[1])
+            return total
+        except (OSError, ValueError):
+            return 0
     try:
         return sum(int(l.split()[2]) for l in open(f"{CG_BLK}/blkio.throttle.io_service_bytes") if " Read " in l)
     except (OSError, ValueError, IndexError):
@@ -91,7 +119,8 @@ def blk_read_bytes():
 def bench(bin_dir, model, env_extra, n_gen, threads, timeout):
     env = dict(os.environ, **env_extra)
     read0 = blk_read_bytes()
-    cmd = (f"echo $$ > {CG_MEM}/cgroup.procs; echo $$ > {CG_BLK}/cgroup.procs; "
+    join = f"echo $$ > {CG_V2}/cgroup.procs; " if V2 else f"echo $$ > {CG_MEM}/cgroup.procs; echo $$ > {CG_BLK}/cgroup.procs; "
+    cmd = (join +
            f"exec {bin_dir}/llama-bench -m {model} -p 0 -n {n_gen} -r 1 -t {threads} -lm mmap --repack 0 -o json")
     t0 = time.time()
     try:
@@ -99,9 +128,9 @@ def bench(bin_dir, model, env_extra, n_gen, threads, timeout):
     except subprocess.TimeoutExpired:
         return {"ok": False, "error": f"timeout {timeout}s"}
     res = {"ok": p.returncode == 0, "wall_s": round(time.time() - t0, 1)}
-    pocket = [l for l in p.stderr.splitlines() if l.startswith("pocket:")]
+    pocket = [l for l in p.stderr.splitlines() if l.startswith("pocket: tokens=") or l.startswith("pocket: v2")]
     if pocket:
-        res["pocket"] = pocket[-1]
+        res["pocket"] = " | ".join(pocket)
     if p.returncode != 0:
         res["error"] = p.stderr.strip().splitlines()[-1:] if p.stderr else "?"
         return res
@@ -121,6 +150,10 @@ CONFIGS = [
     ("expert prefetch + no read-around on experts + 8 I/O threads",
      {"POCKET_MOE": "1", "POCKET_MOE_NORA": "1", "POCKET_MOE_IO_THREADS": "8"}),                          # 4
     ("expert prefetch + next-layer prediction", {"POCKET_MOE": "1", "POCKET_MOE_PREDICT": "1"}),         # 5
+    ("v2 cache (no lookahead)", {"POCKET_MOE": "1", "POCKET_MOE_NORA": "1", "POCKET_MOE_CACHE_MIB": "@cache",
+                                 "POCKET_MOE_LOOKAHEAD": "0"}),                                          # 6
+    ("v2 cache + router lookahead", {"POCKET_MOE": "1", "POCKET_MOE_NORA": "1", "POCKET_MOE_CACHE_MIB": "@cache",
+                                     "POCKET_MOE_LOOKAHEAD": "1"}),                                      # 7
 ]
 
 
@@ -139,6 +172,8 @@ def main():
     ap.add_argument("--out", default="data/stream_lab.json")
     ap.add_argument("--reps", type=int, default=1, help="cold runs per configuration")
     ap.add_argument("--configs", help="comma-separated indexes into CONFIGS (default: all)")
+    ap.add_argument("--cache-mib", type=int, default=0,
+                    help="v2 cache size; default: a quarter of --mem-mib")
     a = ap.parse_args()
     if os.geteuid() != 0:
         sys.exit("needs root (loop devices, cgroups)")
@@ -150,6 +185,9 @@ def main():
                         {"POCKET_MOE": "1",
                          "POCKET_MOE_PIN_MIB": str(a.pin_mib), "POCKET_MOE_STATS": stats}))
     size = os.path.getsize(a.model)
+    from pocketllm import gguf, tuner
+    gm = gguf.load(a.model)
+    v2_cache = tuner.v2_cache_mib(a.mem_mib << 20, gm.weight_bytes - gm.expert_bytes())
     results = {"model": os.path.basename(a.model), "model_gb": round(size / 1e9, 2), "mem_mib": a.mem_mib,
                "drive_mbps": a.drive_mbps, "n_gen": a.n_gen, "threads": a.threads, "runs": []}
     for n in [int(x) for x in a.drives.split(",")]:
@@ -171,6 +209,8 @@ def main():
                     flush_cache(files)
                     bench(a.llama_bin, model, {"POCKET_MOE": "1", "POCKET_MOE_NORA": "1", "POCKET_MOE_STATS": stats},
                           8, a.threads, a.timeout)
+                cache = str(a.cache_mib or v2_cache)
+                env = {k: (cache if v == "@cache" else v) for k, v in env.items()}
                 for rep_i in range(a.reps):
                     flush_cache(files)
                     env = dict(env, POCKET_MOE_VERBOSE="1")

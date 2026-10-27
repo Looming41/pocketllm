@@ -1,9 +1,9 @@
 diff --git a/ggml/include/ggml-pocket.h b/ggml/include/ggml-pocket.h
 new file mode 100644
-index 0000000..32ac0d4
+index 0000000..de3042d
 --- /dev/null
 +++ b/ggml/include/ggml-pocket.h
-@@ -0,0 +1,44 @@
+@@ -0,0 +1,56 @@
 +// PocketLLM expert streaming for memory-mapped MoE models on the CPU.
 +//
 +// When a MoE model is larger than RAM, llama.cpp memory-maps it and the OS
@@ -26,6 +26,10 @@ index 0000000..32ac0d4
 +//   POCKET_MOE_VERBOSE=1     print a summary at exit
 +//   POCKET_MOE_IO_THREADS=N  read ahead with N pread() worker threads instead of
 +//                            fadvise/F_RDADVISE hints (portable fallback; default 0)
++//   POCKET_MOE_CACHE_MIB=N   v2: the engine's own LFU expert cache of N MiB; misses are read with
++//                            POCKET_MOE_FETCH_THREADS (default 16) parallel pread()s (POSIX only)
++//   POCKET_MOE_LOOKAHEAD=0|1 v2: prefetch the next layer's experts by running its router on the
++//                            current input (default 0)
 +//   POCKET_MOE_NORA=1        disable fault read-around on routed-expert tensors only (MADV_RANDOM)
 +//   POCKET_MOE_NORA=2        disable it on the whole mapping (diagnostic; works without POCKET_MOE)
 +#pragma once
@@ -41,7 +45,15 @@ index 0000000..32ac0d4
 +
 +// called by the CPU backend for every MUL_MAT_ID once the expert ids are known
 +// counts[e] = number of rows routed to expert e (n_expert entries); n_tokens = ids->ne[1]
-+GGML_API void ggml_pocket_moe_hook(const struct ggml_tensor * w, const int64_t * counts, int64_t n_expert, int64_t n_tokens);
++// x = the op's input activations (used to run the next layer's router ahead of time)
++GGML_API void ggml_pocket_moe_hook(const struct ggml_tensor * w, const int64_t * counts, int64_t n_expert, int64_t n_tokens,
++                                   const struct ggml_tensor * x);
++
++// v2: pointer the MoE kernel should read expert e of w from (the engine's cache, or the mapping)
++GGML_API const char * ggml_pocket_expert_ptr(const struct ggml_tensor * w, int64_t e);
++
++// v2: called for ordinary matmuls so the engine can find each layer's router (ffn_gate_inp)
++GGML_API void ggml_pocket_router_hint(const struct ggml_tensor * w);
 +
 +GGML_API bool ggml_pocket_enabled(void);
 +
@@ -62,7 +74,7 @@ index fe001a0..41e7843 100644
  
  set_target_properties(ggml-base PROPERTIES
 diff --git a/ggml/src/ggml-cpu/ggml-cpu.c b/ggml/src/ggml-cpu/ggml-cpu.c
-index 53d39d2..7232079 100644
+index 53d39d2..1933108 100644
 --- a/ggml/src/ggml-cpu/ggml-cpu.c
 +++ b/ggml/src/ggml-cpu/ggml-cpu.c
 @@ -6,6 +6,7 @@
@@ -73,24 +85,47 @@ index 53d39d2..7232079 100644
  #include "quants.h"
  #include "ggml-threading.h"
  #include "unary-ops.h"
-@@ -1663,6 +1664,11 @@ static void ggml_compute_forward_mul_mat_id(
+@@ -1265,6 +1266,11 @@ void ggml_compute_forward_mul_mat(
+         return;
+     }
+ 
++    // PocketLLM v2: learn where each layer's router lives (cheap name check, thread 0 only)
++    if (params->ith == 0 && ggml_pocket_enabled()) {
++        ggml_pocket_router_hint(src0);
++    }
++
+     // If tiled is supported, it will execute the full op here and we return
+     if (ggml_compute_forward_mul_mat_tiled(params, dst)) {
+         return;
+@@ -1663,6 +1669,11 @@ static void ggml_compute_forward_mul_mat_id(
                  matrix_row_counts[i02] += 1;
              }
          }
 +
 +        // PocketLLM: the selected experts are known now - start reading them from storage
 +        if (ggml_pocket_enabled()) {
-+            ggml_pocket_moe_hook(src0, matrix_row_counts, n_as, ids->ne[1]);
++            ggml_pocket_moe_hook(src0, matrix_row_counts, n_as, ids->ne[1], src1);
 +        }
      }
  
      // reset current_chunk
+@@ -1685,7 +1696,9 @@ static void ggml_compute_forward_mul_mat_id(
+             continue;
+         }
+ 
+-        const char * src0_cur = (const char *) src0->data + cur_a * nb02;
++        // PocketLLM v2 may serve the expert from its own cache instead of the mapping
++        const char * src0_cur = ggml_pocket_enabled() ? ggml_pocket_expert_ptr(src0, cur_a)
++                                                      : (const char *) src0->data + cur_a * nb02;
+         const void * wdata = (src1->type == vec_dot_type) ? src1->data : params->wdata;
+         const size_t row_size = ggml_row_size(vec_dot_type, ne10);
+ 
 diff --git a/ggml/src/ggml-pocket.c b/ggml/src/ggml-pocket.c
 new file mode 100644
-index 0000000..a982081
+index 0000000..0324dd8
 --- /dev/null
 +++ b/ggml/src/ggml-pocket.c
-@@ -0,0 +1,595 @@
+@@ -0,0 +1,945 @@
 +// PocketLLM expert streaming - see ggml/include/ggml-pocket.h for the design.
 +#define _GNU_SOURCE
 +#include "ggml-pocket.h"
@@ -186,6 +221,26 @@ index 0000000..a982081
 +    int          pred[PK_MAX_USED];
 +    int          n_pred;
 +    uint8_t    * pinned;          // [n_expert]
++    // v2 expert cache
++    struct pk_entry * ent;        // [n_expert]
++    size_t       koff[PK_KINDS];  // offset of each projection inside an entry
++    size_t       slab;            // bytes of one expert (all projections)
++    int          layout;          // 1 once every projection of the layer is known
++    // router of this layer (for lookahead from layer - 1)
++    const char * router;
++    int          router_type;
++    int64_t      router_ne0, router_ne1;
++    size_t       router_nb1;
++};
++
++// one cached expert (gate/up/down slabs back to back)
++struct pk_entry {
++    char *   buf;
++    volatile int state;           // 0 empty, 1 fetching, 2 ready
++    int      transient;           // not admitted to the cache: freed after its layer step
++    int      pending;             // outstanding reads
++    volatile int ready;           // bit k set once projection k has arrived
++    uint64_t step;                // last layer step that needs it (protects from eviction)
 +};
 +
 +static struct {
@@ -202,6 +257,13 @@ index 0000000..a982081
 +
 +    int      cur_layer;
 +    uint64_t tokens;            // decode tokens observed
++    // v2
++    size_t   cache_budget, cache_used;
++    int      lookahead, fetch_threads;
++    uint64_t step;
++    const struct ggml_tensor * cur_w;
++    int      cur_l, cur_k, cur_decode;
++    uint64_t cache_hits, cache_misses, fetched_bytes, la_hits, la_total, transient_bytes;
 +    uint64_t advise_calls, advise_bytes;
 +    uint64_t pred_hits, pred_total;
 +    size_t   pinned_bytes;
@@ -228,6 +290,17 @@ index 0000000..a982081
 +    e = getenv("POCKET_MOE_IO_THREADS");
 +    pk.io_threads = e ? atoi(e) : 0;
 +    if (pk.io_threads > 32) pk.io_threads = 32;
++    e = getenv("POCKET_MOE_CACHE_MIB");
++    pk.cache_budget = e ? (size_t) atoll(e) << 20 : 0;
++    e = getenv("POCKET_MOE_LOOKAHEAD");
++    pk.lookahead = e ? atoi(e) != 0 : 0;  // off by default until real-model labs show a gain
++    e = getenv("POCKET_MOE_FETCH_THREADS");
++    pk.fetch_threads = e ? atoi(e) : 16;
++    if (pk.fetch_threads < 1) pk.fetch_threads = 1;
++    if (pk.fetch_threads > 64) pk.fetch_threads = 64;
++#if defined(_WIN32)
++    pk.cache_budget = 0;  // v2 cache is POSIX-only for now; Windows uses v1 prefetch
++#endif
 +    e = getenv("POCKET_MOE_STATS");
 +    if (e) {
 +        snprintf(pk.stats_path, sizeof(pk.stats_path), "%s", e);
@@ -261,6 +334,11 @@ index 0000000..a982081
 +        pk.maps[pk.n_maps++] = (struct pk_map) { (const char *) addr, size, -1 };
 +#else
 +        int own = fd >= 0 ? dup(fd) : -1;  // keep our own descriptor: the loader may close its file
++#if defined(__APPLE__)
++        if (own >= 0 && pk.cache_budget) {
++            fcntl(own, F_NOCACHE, 1);  // v2 keeps experts in its own cache: do not double-cache them
++        }
++#endif
 +        if (own >= 0) {
 +            pk.maps[pk.n_maps++] = (struct pk_map) { (const char *) addr, size, own };
 +        }
@@ -493,6 +571,271 @@ index 0000000..a982081
 +    free(cs);
 +}
 +
++// =====================================================================================
++// v2: PocketLLM's own expert cache (POCKET_MOE_CACHE_MIB=N, POSIX)
++//
++// Instead of hinting the kernel and letting compute threads page-fault, the engine reads
++// the routed experts itself - in parallel, in whole slabs, from every drive at once - into
++// an LFU cache with touch-count admission (an expert only displaces a colder one), and the
++// MoE kernel reads the cached copy (ggml_pocket_expert_ptr). The next layer's experts are
++// predicted by running that layer's router on the current input and fetched in the
++// background (POCKET_MOE_LOOKAHEAD, default on). Ideas from Pulsar (MIT) and SwiftLM (MIT);
++// implementation is our own, on top of llama.cpp's CPU kernels.
++// =====================================================================================
++#if !defined(_WIN32)
++
++#define PK_JOBS 8192
++static struct {
++    pthread_mutex_t mu;
++    pthread_cond_t  cv_job, cv_done;
++    struct { int fd; off_t off; size_t n; char * dst; struct pk_entry * e; int kind; } q[PK_JOBS];
++    int head, tail, started;
++} fp = { .mu = PTHREAD_MUTEX_INITIALIZER, .cv_job = PTHREAD_COND_INITIALIZER, .cv_done = PTHREAD_COND_INITIALIZER };
++
++static void * pk_fetch_worker(void * arg) {
++    (void) arg;
++    for (;;) {
++        pthread_mutex_lock(&fp.mu);
++        while (fp.head == fp.tail) pthread_cond_wait(&fp.cv_job, &fp.mu);
++        int fd = fp.q[fp.tail].fd; off_t off = fp.q[fp.tail].off; size_t n = fp.q[fp.tail].n;
++        char * dst = fp.q[fp.tail].dst; struct pk_entry * e = fp.q[fp.tail].e; int kind = fp.q[fp.tail].kind;
++        fp.tail = (fp.tail + 1) % PK_JOBS;
++        pthread_mutex_unlock(&fp.mu);
++
++        size_t done = 0;
++        while (done < n) {
++            ssize_t r = pread(fd, dst + done, n - done, off + (off_t) done);
++            if (r <= 0) break;
++            done += (size_t) r;
++        }
++#if defined(POSIX_FADV_DONTNEED)
++        posix_fadvise(fd, off, (off_t) n, POSIX_FADV_DONTNEED);  // the copy lives in our cache now
++#endif
++        pthread_mutex_lock(&fp.mu);
++        if (done < n) {
++            memset(dst + done, 0, n - done);  // never expected; keep the buffer defined
++        }
++        e->ready |= 1 << kind;        // compute threads may start on this projection now
++        if (--e->pending == 0) {
++            e->state = 2;
++        }
++        pthread_cond_broadcast(&fp.cv_done);
++        pthread_mutex_unlock(&fp.mu);
++    }
++    return NULL;
++}
++
++static void pk_fetch_start(void) {
++    if (fp.started) return;
++    fp.started = 1;
++    for (int i = 0; i < pk.fetch_threads; i++) {
++        pthread_t t;
++        if (pthread_create(&t, NULL, pk_fetch_worker, NULL) == 0) pthread_detach(t);
++    }
++}
++
++static int pk_layout_ready(struct pk_layer * L) {
++    if (L->layout) return 1;
++    // the layer is known once its gate (or gate_up) and down projections have been seen
++    int have_gate = L->data[0] || L->data[3];
++    if (!have_gate || !L->data[2] || (L->data[0] && !L->data[1])) return 0;
++    size_t off = 0;
++    for (int k = 0; k < PK_KINDS; k++) {
++        if (L->data[k] && L->map[k] < 0) return 0;  // not file backed: nothing to stream
++        L->koff[k] = off;
++        if (L->data[k]) off += (L->nb2[k] + 63) & ~(size_t) 63;
++    }
++    L->slab = off;
++    L->ent = calloc((size_t) L->n_expert, sizeof(struct pk_entry));
++    L->layout = L->ent != NULL;
++    return L->layout;
++}
++
++// pick the coldest admitted entry that the current/next step does not need
++static int pk_victim(uint64_t min_count, int * vl, int * ve) {
++    uint64_t best = UINT64_MAX;
++    *vl = -1;
++    for (int l = 0; l <= pk.max_layer; l++) {
++        struct pk_layer * L = &pk.layers[l];
++        if (!L->ent) continue;
++        for (int e = 0; e < L->n_expert; e++) {
++            struct pk_entry * en = &L->ent[e];
++            if (en->state != 2 || en->transient || en->step >= pk.step) continue;
++            if (L->count[e] < best) { best = L->count[e]; *vl = l; *ve = e; }
++        }
++    }
++    return *vl >= 0 && best < min_count;
++}
++
++// make sure expert e of layer l is resident or on its way; `need_step` protects it until then
++static void pk_ensure(int l, int e, uint64_t need_step) {
++    struct pk_layer * L = &pk.layers[l];
++    struct pk_entry * en = &L->ent[e];
++    if (en->step < need_step) en->step = need_step;
++    if (en->state != 0) {
++        pk.cache_hits += en->state == 2;
++        return;
++    }
++    pk.cache_misses++;
++    int transient = 1;
++    if (pk.cache_used + L->slab <= pk.cache_budget) {
++        transient = 0;
++    } else {
++        int vl, ve;
++        if (pk_victim(L->count[e] + 1, &vl, &ve)) {   // touch-count admission
++            struct pk_entry * v = &pk.layers[vl].ent[ve];
++            free(v->buf);
++            v->buf = NULL;
++            v->state = 0;
++            pk.cache_used -= pk.layers[vl].slab;
++            transient = 0;
++        }
++    }
++    char * buf = NULL;
++    if (posix_memalign((void **) &buf, 4096, L->slab) != 0) return;  // stay on the mmap path
++    en->buf = buf;
++    en->transient = transient;
++    if (transient) pk.transient_bytes += L->slab; else pk.cache_used += L->slab;
++    pthread_mutex_lock(&fp.mu);
++    en->state = 1;
++    en->pending = 0;
++    en->ready = 0;
++    for (int k = 0; k < PK_KINDS; k++) {
++        if (!L->data[k]) continue;
++        const struct pk_map * mp = &pk.maps[L->map[k]];
++        const char * src = L->data[k] + (size_t) e * L->nb2[k];
++        int next = (fp.head + 1) % PK_JOBS;
++        if (next == fp.tail) {  // queue full: read it ourselves
++            pthread_mutex_unlock(&fp.mu);
++            ssize_t r = pread(mp->fd, buf + L->koff[k], L->nb2[k], (off_t) (src - mp->base));
++            (void) r;
++            pthread_mutex_lock(&fp.mu);
++            en->ready |= 1 << k;
++            continue;
++        }
++        fp.q[fp.head].fd = mp->fd; fp.q[fp.head].off = (off_t) (src - mp->base); fp.q[fp.head].n = L->nb2[k];
++        fp.q[fp.head].dst = buf + L->koff[k]; fp.q[fp.head].e = en; fp.q[fp.head].kind = k;
++        fp.head = next;
++        en->pending++;
++        pk.fetched_bytes += L->nb2[k];
++    }
++    if (en->pending == 0) en->state = 2;
++    pthread_cond_broadcast(&fp.cv_job);
++    pthread_mutex_unlock(&fp.mu);
++}
++
++static void pk_wait(int l, const int * sel, int n) {
++    struct pk_layer * L = &pk.layers[l];
++    pthread_mutex_lock(&fp.mu);
++    for (int i = 0; i < n; i++) {
++        while (L->ent[sel[i]].state == 1) pthread_cond_wait(&fp.cv_done, &fp.mu);
++    }
++    pthread_mutex_unlock(&fp.mu);
++}
++
++// drop transient copies no step still needs
++static void pk_free_transients(void) {
++    for (int l = 0; l <= pk.max_layer; l++) {
++        struct pk_layer * L = &pk.layers[l];
++        if (!L->ent) continue;
++        for (int e = 0; e < L->n_expert; e++) {
++            struct pk_entry * en = &L->ent[e];
++            if (en->transient && en->state == 2 && en->step < pk.step) {
++                free(en->buf);
++                en->buf = NULL;
++                en->state = 0;
++                en->transient = 0;
++                pk.transient_bytes -= L->slab;
++            }
++        }
++    }
++}
++
++static float pk_f16(uint16_t h) {
++    uint32_t s = (uint32_t) (h & 0x8000) << 16, ex = (h >> 10) & 0x1f, m = h & 0x3ff, f;
++    if (ex == 0) {
++        if (m == 0) { f = s; }
++        else { ex = 127 - 15 + 1; while (!(m & 0x400)) { m <<= 1; ex--; } m &= 0x3ff; f = s | (ex << 23) | (m << 13); }
++    } else if (ex == 31) { f = s | 0x7f800000 | (m << 13); }
++    else { f = s | ((ex + 127 - 15) << 23) | (m << 13); }
++    float out;
++    memcpy(&out, &f, sizeof out);
++    return out;
++}
++
++// run layer l+1's router on layer l's input and fetch the experts it is likely to pick
++static void pk_lookahead(int l, const struct ggml_tensor * x, int k) {
++    if (l + 1 >= PK_MAX_LAYERS) return;
++    struct pk_layer * N = &pk.layers[l + 1];
++    if (!N->router || !N->layout || !x || x->type != GGML_TYPE_F32 || x->ne[0] != N->router_ne0) return;
++    int64_t ne = N->router_ne1 < N->n_expert ? N->router_ne1 : N->n_expert;
++    const float * v = (const float *) x->data;
++    int best[PK_MAX_USED];
++    float bestv[PK_MAX_USED];
++    int nb = 0;
++    if (k > PK_MAX_USED) k = PK_MAX_USED;
++    for (int64_t e = 0; e < ne; e++) {
++        const char * row = N->router + (size_t) e * N->router_nb1;
++        float acc = 0.0f;
++        if (N->router_type == GGML_TYPE_F32) {
++            const float * w = (const float *) row;
++            for (int64_t j = 0; j < N->router_ne0; j++) acc += w[j] * v[j];
++        } else {
++            const uint16_t * w = (const uint16_t *) row;
++            for (int64_t j = 0; j < N->router_ne0; j++) acc += pk_f16(w[j]) * v[j];
++        }
++        if (nb < k) { best[nb] = (int) e; bestv[nb++] = acc; continue; }
++        int lo = 0;
++        for (int i = 1; i < nb; i++) if (bestv[i] < bestv[lo]) lo = i;
++        if (acc > bestv[lo]) { best[lo] = (int) e; bestv[lo] = acc; }
++    }
++    pk.layers[l].n_pred = 0;
++    for (int i = 0; i < nb; i++) {
++        pk.layers[l].pred[pk.layers[l].n_pred++] = best[i];
++        pk_ensure(l + 1, best[i], pk.step + 1);
++    }
++}
++
++#endif // !_WIN32
++
++void ggml_pocket_router_hint(const struct ggml_tensor * w) {
++    if (!w || (w->type != GGML_TYPE_F32 && w->type != GGML_TYPE_F16)) return;
++    int l;
++    char kind[32];
++    if (sscanf(w->name, "blk.%d.ffn_%31[a-z_]", &l, kind) != 2 || l < 0 || l >= PK_MAX_LAYERS) return;
++    if (strcmp(kind, "gate_inp") != 0) return;
++    struct pk_layer * L = &pk.layers[l];
++    if (L->router) return;
++    pk_lock(&pk.lock);
++    L->router = (const char *) w->data;
++    L->router_type = w->type;
++    L->router_ne0 = w->ne[0];
++    L->router_ne1 = w->ne[1];
++    L->router_nb1 = w->nb[1];
++    pk_unlock(&pk.lock);
++}
++
++const char * ggml_pocket_expert_ptr(const struct ggml_tensor * w, int64_t e) {
++    const char * def = (const char *) w->data + (size_t) e * w->nb[2];
++#if !defined(_WIN32)
++    if (!pk.cache_budget || !pk.cur_decode || w != pk.cur_w) return def;
++    struct pk_layer * L = &pk.layers[pk.cur_l];
++    if (!L->ent || e < 0 || e >= L->n_expert) return def;
++    struct pk_entry * en = &L->ent[e];
++    if (en->state == 0 || !en->buf) return def;
++    const int bit = 1 << pk.cur_k;
++    if (!(en->ready & bit)) {
++        // still in flight: wait for just this projection (the rest keeps streaming meanwhile)
++        pthread_mutex_lock(&fp.mu);
++        while (!(en->ready & bit)) pthread_cond_wait(&fp.cv_done, &fp.mu);
++        pthread_mutex_unlock(&fp.mu);
++    }
++    return en->buf + L->koff[pk.cur_k];
++#else
++    return def;
++#endif
++}
++
 +static int pk_kind(const char * name, int * layer) {
 +    char kind[32];
 +    if (sscanf(name, "blk.%d.ffn_%31[a-z_]", layer, kind) != 2) {
@@ -553,6 +896,13 @@ index 0000000..a982081
 +                (unsigned long long) pk.pred_hits, (unsigned long long) pk.pred_total,
 +                pk.pinned_bytes / 1048576.0);
 +    }
++    if (pk.verbose && pk.cache_budget) {
++        fprintf(stderr, "pocket: v2 cache_mib=%.0f/%.0f hits=%llu misses=%llu fetched_gb=%.2f transient_mib=%.0f "
++                        "lookahead_hit=%.1f%%\n",
++                pk.cache_used / 1048576.0, pk.cache_budget / 1048576.0, (unsigned long long) pk.cache_hits,
++                (unsigned long long) pk.cache_misses, pk.fetched_bytes / 1e9, pk.transient_bytes / 1048576.0,
++                pk.pred_total ? 100.0 * pk.pred_hits / pk.pred_total : 0.0);
++    }
 +    if (!pk.stats_path[0] || !pk.tokens) return;
 +    FILE * f = fopen(pk.stats_path, "w");
 +    if (!f) return;
@@ -574,7 +924,8 @@ index 0000000..a982081
 +    fclose(f);
 +}
 +
-+void ggml_pocket_moe_hook(const struct ggml_tensor * w, const int64_t * counts, int64_t n_expert, int64_t n_tokens) {
++void ggml_pocket_moe_hook(const struct ggml_tensor * w, const int64_t * counts, int64_t n_expert, int64_t n_tokens,
++                          const struct ggml_tensor * x) {
 +    pk_init();
 +    if (!pk.enabled || !w || n_expert <= 0) {
 +        return;
@@ -599,11 +950,22 @@ index 0000000..a982081
 +    }
 +    if (l > pk.max_layer) pk.max_layer = l;
 +
++    // the kernel asks ggml_pocket_expert_ptr() for this op's experts after the barrier
++    pk.cur_w = w;
++    pk.cur_l = l;
++    pk.cur_k = kind;
++    pk.cur_decode = n_tokens == 1;
++
 +    if (l == pk.cur_layer) {          // second/third projection of the same layer: already handled
 +        pk_unlock(&pk.lock);
 +        return;
 +    }
 +    const int decode = n_tokens == 1;
++#if !defined(_WIN32)
++    const int use_v2 = pk.cache_budget && decode && pk.tokens >= 1 && pk_layout_ready(L);
++#else
++    const int use_v2 = 0;
++#endif
 +    if (decode && l <= pk.cur_layer) {  // layers restart: a new token
 +        pk.tokens++;
 +        if (pk.tokens == 2 && !pk.stats_loaded) {
@@ -626,10 +988,24 @@ index 0000000..a982081
 +    // 1. read the selected experts of this layer (all projections) ahead of the compute threads
 +    int n_sel = 0;
 +    int sel[PK_MAX_USED];
++#if !defined(_WIN32)
++    if (use_v2) {
++        pk.step++;
++        pk_fetch_start();
++        pk_free_transients();
++    }
++#endif
 +    for (int64_t e = 0; e < n_expert; e++) {
 +        if (counts[e] > 0) {
-+            if (!L->pinned[e]) pk_prefetch_expert(L, (int) e);
 +            L->count[e]++;
++#if !defined(_WIN32)
++            if (use_v2) {
++                pk_ensure(l, (int) e, pk.step);
++            } else
++#endif
++            if (!L->pinned[e]) {
++                pk_prefetch_expert(L, (int) e);
++            }
 +            if (n_sel < PK_MAX_USED) sel[n_sel++] = (int) e;
 +        }
 +    }
@@ -660,7 +1036,7 @@ index 0000000..a982081
 +
 +        // 2. predict the next layer's experts from the transition counts and read them ahead
 +        struct pk_layer * N = l + 1 < PK_MAX_LAYERS ? &pk.layers[l + 1] : NULL;
-+        if (pk.predict && L->trans && N && N->count) {
++        if (pk.predict && !(use_v2 && pk.lookahead) && L->trans && N && N->count) {
 +            int64_t nn = L->n_expert_next;
 +            uint64_t * score = calloc((size_t) nn, sizeof(uint64_t));
 +            uint64_t total = 0;
@@ -684,6 +1060,15 @@ index 0000000..a982081
 +            free(score);
 +        }
 +    }
++#if !defined(_WIN32)
++    if (use_v2) {
++        // queue the next layer's likely experts behind this layer's reads, then wait for ours
++        if (pk.lookahead) {
++            pk_lookahead(l, x, n_sel);
++        }
++        (void) pk_wait;  // the kernel waits per projection in ggml_pocket_expert_ptr instead
++    }
++#endif
 +    pk_unlock(&pk.lock);
 +}
 diff --git a/src/llama-model-loader.cpp b/src/llama-model-loader.cpp

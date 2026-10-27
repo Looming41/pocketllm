@@ -1,0 +1,145 @@
+name: real-model-lab
+
+# Manual only: downloads real MoE models and measures stock llama.cpp vs the PocketLLM
+# engine (v1 prefetch, v2 own cache + router lookahead), and SwiftLM's expert streaming
+# on a low-RAM Apple Silicon runner. Results are committed to the `lab-results` branch.
+#
+# Cost note: on private repositories macOS minutes count 10x against the free quota.
+on:
+  workflow_dispatch:
+    inputs:
+      linux_model:
+        description: "Linux lab model preset (scripts/fetch_model.py)"
+        default: qwen3-30b-a3b
+        type: choice
+        options: [olmoe, qwen3-30b-a3b, gpt-oss-20b]
+      linux_mem_mib:
+        description: "RAM limit for the model process (cgroup), MiB"
+        default: "6144"
+      drive_mbps:
+        description: "Read speed of each emulated USB drive, MB/s"
+        default: "300"
+      run_mac:
+        description: "Also run the Apple Silicon jobs (10x minutes on private repos)"
+        type: boolean
+        default: true
+      mac_model:
+        description: "GGUF preset for the Mac llama.cpp A/B"
+        default: qwen3-30b-a3b
+        type: choice
+        options: [olmoe, qwen3-30b-a3b, gpt-oss-20b]
+
+permissions:
+  contents: write
+
+jobs:
+  linux-usb-lab:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          df -h / /mnt
+      - name: Build llama.cpp + engine
+        run: scripts/build_llamacpp.sh cpu
+      - name: Download model
+        id: model
+        run: |
+          python -m pip install --quiet huggingface_hub
+          sudo mkdir -p /mnt/models && sudo chown $USER /mnt/models
+          M=$(python scripts/fetch_model.py ${{ inputs.linux_model }} /mnt/models --max-gb 25)
+          echo "path=$M" >> "$GITHUB_OUTPUT"
+          python -m pocketllm inspect "$M"
+      - name: USB lab (cgroup RAM limit + throttled loop drives)
+        run: |
+          mkdir -p results
+          sudo -E env "PATH=$PATH" python scripts/stream_lab.py --model "${{ steps.model.outputs.path }}" \
+            --llama-bin bin/linux-x64 --drives 1,2 --drive-mbps ${{ inputs.drive_mbps }} \
+            --mem-mib ${{ inputs.linux_mem_mib }} --n-gen 16 --reps 2 --configs 0,3,6,7 \
+            --workdir /mnt/lab --out results/linux_usb_lab.json | tee results/linux_usb_lab.log
+          sudo chown -R $USER results
+          python scripts/lab_report.py results/linux_usb_lab.json | tee results/linux_usb_lab.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Fast disk A/B (no drive throttle)
+        run: |
+          python -m pocketllm ab "${{ steps.model.outputs.path }}" --n-gen 16 --out results/linux_ab_fastdisk.json || true
+      - if: always()
+        uses: ./.github/actions/push-results
+        with:
+          name: linux
+
+  mac-llamacpp-ab:
+    if: ${{ inputs.run_mac }}
+    runs-on: macos-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Machine
+        run: |
+          sysctl -n machdep.cpu.brand_string hw.memsize hw.ncpu; df -h /; sw_vers
+      - name: Build llama.cpp + engine (Metal)
+        run: scripts/build_llamacpp.sh auto
+      - name: Download model
+        id: model
+        run: |
+          python -m pip install --quiet huggingface_hub
+          FREE=$(df -g / | awk 'NR==2{print $4}')
+          CAP=$(( FREE > 12 ? FREE - 8 : 4 ))
+          echo "free ${FREE} GB, cap ${CAP} GB"
+          M=$(python scripts/fetch_model.py ${{ inputs.mac_model }} "$RUNNER_TEMP/models" --max-gb $CAP)
+          echo "path=$M" >> "$GITHUB_OUTPUT"
+          python -m pocketllm inspect "$M"
+      - name: A/B on a low-RAM Mac (stock vs engine v1 vs v2), cold cache via purge
+        env:
+          POCKET_PURGE: "1"
+        run: |
+          mkdir -p results
+          python -m pocketllm profile --no-read-test | tee results/mac_profile.txt
+          python -m pocketllm plan --local-only --no-read-test -v >> results/mac_profile.txt || true
+          python -m pocketllm ab "${{ steps.model.outputs.path }}" --n-gen 16 --out results/mac_ab.json | tee results/mac_ab.log
+      - if: always()
+        uses: ./.github/actions/push-results
+        with:
+          name: mac-llamacpp
+
+  mac-swiftlm:
+    if: ${{ inputs.run_mac }}
+    runs-on: macos-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Machine
+        run: sysctl -n machdep.cpu.brand_string hw.memsize hw.ncpu; df -h /
+      - name: Download SwiftLM release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p swiftlm && cd swiftlm
+          gh release download -R SharpAI/SwiftLM --pattern '*macos-arm64*.tar.gz' --clobber
+          tar -xzf *.tar.gz
+          find . -maxdepth 3 -name SwiftLM -type f | head -1 > ../swiftlm_path
+          cat ../swiftlm_path
+      - name: SwiftLM --stream-experts (Qwen3-30B-A3B 4-bit MLX)
+        run: |
+          mkdir -p results
+          BIN=$(cat swiftlm_path)
+          sudo -n purge || true
+          "$BIN" --model mlx-community/Qwen3-30B-A3B-4bit --port 5413 --stream-experts > results/swiftlm_server.log 2>&1 &
+          python scripts/bench_openai.py http://127.0.0.1:5413 --model mlx-community/Qwen3-30B-A3B-4bit \
+            --tokens 64 --runs 2 --label "SwiftLM --stream-experts" --out results/mac_swiftlm.jsonl || true
+          tail -40 results/swiftlm_server.log || true
+          kill %1 || true
+      - if: always()
+        uses: ./.github/actions/push-results
+        with:
+          name: mac-swiftlm

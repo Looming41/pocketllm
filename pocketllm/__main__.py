@@ -185,8 +185,14 @@ def cmd_ab(a):
     spec = planner.ModelSpec.from_gguf(gguf.load(a.model), a.model)
     pl = planner.plan(spec, core.budget(p), ctx=a.ctx)
     print(f"plan: {pl.strategy} / {pl.verdict}")
-    r = tuner.ab_compare(a.model, pl.to_dict(), p, n_gen=a.n_gen)
-    print(f"PocketLLM engine speedup: x{r['speedup']}")
+    m = gguf.load(a.model)
+    r = tuner.ab_compare(a.model, pl.to_dict(), p, n_gen=a.n_gen, cache_mib=a.cache_mib,
+                         dense_bytes=m.weight_bytes - m.expert_bytes())
+    print(f"PocketLLM engine speedup: v1 x{r['speedup']}, v2 x{r.get('speedup_v2')}")
+    if a.out:
+        r.update(model=os.path.basename(a.model), plan=pl.to_dict(), host=core.hardware_summary(p))
+        with open(a.out, "w") as f:
+            json.dump(r, f, indent=2)
 
 
 def cmd_serve(a):
@@ -222,6 +228,8 @@ def main(argv=None):
     s.add_argument("model")
     s.add_argument("--ctx", type=int, default=4096)
     s.add_argument("--n-gen", type=int, default=16)
+    s.add_argument("--cache-mib", type=int, help="v2 cache size (default: available RAM - dense weights - 768 MiB)")
+    s.add_argument("--out", help="write the results as JSON")
     s.set_defaults(fn=cmd_ab)
     s = sub.add_parser("serve")
     s.add_argument("--host", default="127.0.0.1")

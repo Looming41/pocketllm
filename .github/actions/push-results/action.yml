@@ -1,0 +1,36 @@
+name: push-results
+description: Commit ./results to the lab-results branch under runs/<run id>/<name>
+inputs:
+  name:
+    description: sub-directory for this job
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      if: always()
+      run: |
+        set -e
+        [ -d results ] || exit 0
+        DEST="runs/${GITHUB_RUN_ID}/${{ inputs.name }}"
+        TMP=$(mktemp -d)
+        cp -R results/. "$TMP/"
+        git config user.name "pocketllm-lab"
+        git config user.email "pocketllm-lab@users.noreply.github.com"
+        for attempt in 1 2 3 4 5; do
+          if git ls-remote --exit-code --heads origin lab-results >/dev/null 2>&1; then
+            git fetch -q origin lab-results
+            git checkout -q -B lab-results FETCH_HEAD
+          else
+            git checkout -q --orphan lab-results
+            git rm -rq --cached . >/dev/null 2>&1 || true
+            find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+          fi
+          mkdir -p "$DEST"
+          cp -R "$TMP/." "$DEST/"
+          git add "$DEST"
+          git commit -q -m "lab results: run ${GITHUB_RUN_ID} ${{ inputs.name }}" || exit 0
+          if git push -q origin lab-results; then exit 0; fi
+          sleep $((attempt * 5))
+        done
+        exit 1
