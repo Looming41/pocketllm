@@ -156,4 +156,29 @@ With everything in RAM, q8_0 KV + flash attention was **slower** on this CPU (67
 ### Caveats
 Loop devices have almost no access latency, unlike real USB flash, and real models route differently. These are **lab numbers**: the next step is the same measurement on a real laptop with real USB drives and a real MoE model (Qwen3-30B-A3B, Llama 4 Scout), using `scripts/usb_vs_ssd.sh` and `pocketllm tune`.
 
+## Real model: Qwen3-30B-A3B Q4_K_M (18.56 GB), GitHub Actions ubuntu-latest (4 vCPU)
+First run on a real, trained MoE (CI run 40516379030; `docs/results/real_qwen3_30b_*.json`). Same method as the lab above: cgroup RAM limit **6 GiB** (a third of the model), loop-device "USB drives" throttled to **300 MB/s each**, 16 tokens, 2 cold runs, 4 threads.
+
+### R12: real model, USB lab
+| config | 1 drive | 2 drives |
+|---|---|---|
+| stock llama.cpp mmap | 0.08 ± 0.00 tok/s (161.9 GB read) | 0.12 ± 0.00 (157.9 GB) |
+| PocketLLM v1 (prefetch + no read-around) | 0.63 ± 0.09 (×7.5, 56.3 GB) | 0.66 ± 0.18 (×5.5, 62.1 GB) |
+| **PocketLLM v2 (own expert cache, 4.4 GiB)** | **0.82 ± 0.09 (×9.6, 52.8 GB)** | **1.04 ± 0.00 (×8.7, 53.9 GB)** |
+| v2 + router lookahead | 0.65 ± 0.00 (×7.6) | 0.91 ± 0.00 (×7.6) |
+
+* **This reverses the random-model result (R8).** A trained router keeps re-picking experts. The v2 cache served 64% of expert lookups (3,907 hits, 2,229 misses), while random routing gives it nothing to hit. v2 also scales with the second drive, and v1 did not here.
+* Router lookahead predicted 86% of next-layer experts correctly, but it was still slower than v2 without it. The extra reads cost more than the early start saves at 300 MB/s.
+* Total device reads (53–62 GB for 16 tokens) are far above what the engine fetched itself (v2: 6.4 GB). We have not yet explained the remainder. Likely candidates are page-cache churn of the mmap'd dense weights and output head under the 6 GiB limit, and llama-bench's warm-up run. Lowering it is the next lever.
+* Absolute speed is honest and modest: about **1 token/s** for a 30B model on a machine with a third of the RAM it needs, from two 300 MB/s drives. Stock llama.cpp manages 0.08–0.12.
+
+### R13: real model, fast disk (no throttle, no cgroup limit, ~16 GB runner, `pocketllm ab`)
+| stock llama.cpp | PocketLLM v1 | PocketLLM v2 |
+|---|---|---|
+| 3.80 tok/s | 4.61 (×1.21) | 2.70 (×0.71) |
+
+On fast storage, v2's copies cost more than they save.
+
+**Planner change:** for MoE models that must be streamed, the planner turns on the v2 cache (`POCKET_MOE_CACHE_MIB` = RAM left after dense weights and KV, minus 768 MiB) when the measured drive speed is below 1 GB/s. Otherwise it keeps v1. That threshold rests on this one model, one OS and two drive speeds. `pocketllm ab` measures stock, v1 and v2 on the user's own machine. Windows has no v2 yet and falls back to v1.
+
 ## Environment E1: target laptop. **TODO** (run `scripts/check_laptop.sh`, then `docs/TEST_PLAN_BIG_MODEL_KO.md`)

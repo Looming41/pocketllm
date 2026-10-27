@@ -51,7 +51,7 @@ llama.cpp CPU 백엔드의 `MUL_MAT_ID`(MoE 행렬곱)에서 **스레드 0이 �
 ## 5. 참고 프로젝트에서 가져온 것과 실측 결과 (R8)
 | 출처 | 가져온 원리 | PocketLLM 구현 | 이 실험실 결과 | 기본값 |
 |---|---|---|---|---|
-| [giannisanni/pulsar](https://github.com/giannisanni/pulsar) (MIT) | 앱 자체 LFU 전문가 캐시, 병렬 I/O(io_uring QD32), 라우터 lookahead | 엔진 v2: LFU + 접촉 횟수 기반 입장, `pread` 풀, 프로젝션별 준비 상태, 다음 레이어 라우터 미리 계산 | v1보다 느림(4.17 → 2.47~3.55 tok/s). lookahead는 1.65 | 끔. `POCKET_MOE_CACHE_MIB=N`, `POCKET_MOE_LOOKAHEAD=1` |
+| [giannisanni/pulsar](https://github.com/giannisanni/pulsar) (MIT) | 앱 자체 LFU 전문가 캐시, 병렬 I/O(io_uring QD32), 라우터 lookahead | 엔진 v2: LFU + 접촉 횟수 기반 입장, `pread` 풀, 프로젝션별 준비 상태, 다음 레이어 라우터 미리 계산 | 무작위 가중치 모델에서는 v1보다 느림(4.17 → 2.47~3.55). **실모델 Qwen3-30B-A3B(RAM 6GiB, 300MB/s)에서는 v1 0.63 → v2 0.82 tok/s, 드라이브 2개 0.66 → 1.04**(캐시 적중 64%, RESULTS R12). 빠른 디스크에서는 v2가 느림(4.61 → 2.70) | 드라이브 속도가 1GB/s 미만이면 플래너가 v2를 켬. lookahead는 끔(적중 86%여도 느림) |
 | [SharpAI/SwiftLM](https://github.com/SharpAI/SwiftLM) | "앱 메모리에 전문가를 캐시하지 말 것"(OS 페이지 캐시에 맡김), `--stream-experts`, top-k 축소 | v1을 기본으로 유지. **SwiftLM을 맥(MLX) 백엔드로 연결**(`pocketllm/mlx.py`, 플래너가 `--stream-experts` 인자 생성). `POCKET_MOE_TOPK` | 위 v2 결과가 SwiftLM의 관찰과 같음. top-k 6: ×1.5, top-k 4: **×2.5** (9.06 tok/s) | top-k는 품질 손실이 있어 사용자가 명시적으로 선택 |
 | [EfficientMoE/MoE-Infinity](https://github.com/EfficientMoE/MoE-Infinity) (Apache-2.0) | 요청 단위 활성화 추적, 직전 활성화 기반 프리페치 | 직전 토큰 프리페치 `POCKET_MOE_PREVTOK=1` | 무작위 라우팅에서는 이득 없음(3.56) | 끔. 실모델 실험실에서 재측정 |
 | [giannisanni/pulsar](https://github.com/giannisanni/pulsar) | 전문가는 Q2_K, 나머지는 Q8_0 (`pulsar-quant --map "_exps.=q2_k"`) | `pocketllm requant --recipe experts-q2` (llama-quantize `--tensor-type`) | **Q4 4.15 → 9.34 tok/s (×2.3)**, 나머지를 Q4로 하면 13.76 (×3.3), top-k 4까지 더하면 18.72 (R9) | 프로비저닝에서 품질 검증 후 선택 |

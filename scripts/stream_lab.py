@@ -165,6 +165,8 @@ CONFIGS = [
     ("v1, 8K context, f16 KV", {"POCKET_MOE": "1", "POCKET_MOE_NORA": "1", "LAB_ARGS": "-d 8192 -fa 1"}),  # 13
     ("v1, 8K context, q8_0 KV (planner default when streaming)",
      {"POCKET_MOE": "1", "POCKET_MOE_NORA": "1", "LAB_ARGS": "-d 8192 -fa 1 -ctk q8_0 -ctv q8_0"}),       # 14
+    ("v2 cache + top-k 4 (quality trade-off)", {"POCKET_MOE": "1", "POCKET_MOE_NORA": "1", "POCKET_MOE_CACHE_MIB": "@cache",
+                                                "POCKET_MOE_LOOKAHEAD": "0", "POCKET_MOE_TOPK": "4"}),  # 15
 ]
 
 

@@ -126,7 +126,7 @@ index 53d39d2..1933108 100644
  
 diff --git a/ggml/src/ggml-pocket.c b/ggml/src/ggml-pocket.c
 new file mode 100644
-index 0000000..7e4812a
+index 0000000..ab56340
 --- /dev/null
 +++ b/ggml/src/ggml-pocket.c
 @@ -0,0 +1,999 @@
@@ -587,7 +587,7 @@ index 0000000..7e4812a
 +// an LFU cache with touch-count admission (an expert only displaces a colder one), and the
 +// MoE kernel reads the cached copy (ggml_pocket_expert_ptr). The next layer's experts are
 +// predicted by running that layer's router on the current input and fetched in the
-+// background (POCKET_MOE_LOOKAHEAD, default on). Ideas from Pulsar (MIT) and SwiftLM (MIT);
++// background (POCKET_MOE_LOOKAHEAD, default off: slower in every lab so far). Ideas from Pulsar (MIT) and SwiftLM (MIT);
 +// implementation is our own, on top of llama.cpp's CPU kernels.
 +// =====================================================================================
 +#if !defined(_WIN32)

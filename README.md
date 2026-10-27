@@ -26,6 +26,16 @@ With slower drives (100 MB/s each, like cheap flash sticks): stock 0.08 tok/s, a
 
 On fast internal storage (about 2 GB/s), the gain shrinks to noise (×0.98–1.6, R5c). PocketLLM pays off when the weights come from slow drives.
 
+### Real model: Qwen3-30B-A3B (18.6 GB) with 6 GiB of RAM, from 300 MB/s drives (CI lab, R12)
+
+| | 1 drive | 2 drives |
+|---|---|---|
+| stock llama.cpp | 0.08 tok/s | 0.12 tok/s |
+| PocketLLM v1 | 0.63 (×7.5) | 0.66 |
+| **PocketLLM v2 (own expert cache)** | **0.82 (×9.6)** | **1.04 (×8.7)** |
+
+On a real router, the v2 cache hits 64% of expert lookups, so it beats v1. On random-weight models it lost, which is why the default is now chosen by drive speed. On a fast unthrottled disk, v1 is ×1.21 over stock and v2 is slower (R13).
+
 ### Ideas taken from Pulsar, SwiftLM and ExpertFlow (R8, R9, same lab, 1 drive)
 
 | what (source) | decode | note |
@@ -35,7 +45,7 @@ On fast internal storage (about 2 GB/s), the gain shrinks to noise (×0.98–1.6
 | + Q2_K experts + Q4_K rest | **13.76 (×3.3)** | model 2.18 GB |
 | + top-k 4 of 8 experts per token (SwiftLM `SWIFTLM_TOP_K`) | **18.72 (×4.5)** | |
 | at 8K context: q8_0 instead of f16 KV cache (SwiftLM's KV lesson; planner default when streaming) | 0.44 → **4.83 (×11)** | R11; f16 control with +192 MiB RAM: 1.30 |
-| own LFU expert cache + router lookahead (Pulsar) | 1.65–3.55 (slower) | kept opt-in, matches SwiftLM's "don't cache experts in app memory" |
+| own LFU expert cache (Pulsar), random-weight model | 2.47–3.55 (slower) | on the **real** model it wins instead (R12), so it is now the default for slow drives |
 
 Low-bit experts and top-k **change the model's output**. Unlike the streaming engine, they trade quality for speed and size, so a recipe goes on a drive only after `pocketllm qualify` passes on the provisioning station. When weights must be streamed, the planner also quantizes the KV cache to q8_0, following SwiftLM's long-context finding that every KV byte saved becomes page cache for weights. On Apple Silicon, MLX models run through SwiftLM's own `--stream-experts` backend.
 
@@ -76,7 +86,7 @@ USB drive(s)  ── storage + read bandwidth only ──▶  host laptop (does 
 ```
 
 ## Status and honest limits
-- Every number above comes from an emulated low-RAM machine with throttled loop devices standing in for USB drives, running a **random-weight** MoE model. The model's routing statistics differ from real models, so prediction and pinning still need testing on real models such as Qwen3-30B-A3B and Llama 4 Scout. **No real model has been run yet** because model downloads were blocked in the build environment.
+- Most numbers above come from an emulated low-RAM machine with throttled loop devices standing in for USB drives, running a **random-weight** MoE model. The model's routing statistics differ from real models, so prediction and pinning still need testing on real models such as Qwen3-30B-A3B and Llama 4 Scout. The first real-model run (Qwen3-30B-A3B on a Linux CI runner, R12–R13) confirms the engine's gain on trained routing. Quality checks of requant recipes and real laptops with real USB drives are still to do.
 - **CI (GitHub Actions) builds and tests on Linux, macOS (Apple Silicon) and Windows (MSVC)**: unit tests plus an engine check, in which the engine reports activity and its greedy output is identical with the engine off and on. CI also uploads per-OS binaries for the drive (`pocketllm-bin-<os>` artifacts). CI proves that the engine works on each OS. It does **not** measure speed on a real Mac or Windows laptop with USB drives. Windows has no equivalent of `MADV_RANDOM`, so the read-around fix does not apply there.
 - CI found two real bugs that root-only local tests missed. First, an expert whose mlock failed under a normal user's limit was still marked as pinned, so it was never prefetched. Second, manifest paths written on Windows used backslashes, so a drive sealed on one OS failed verification on another. Both are fixed and covered by tests.
 - llama.cpp RPC has no authentication or encryption. Use it only on a dedicated link.

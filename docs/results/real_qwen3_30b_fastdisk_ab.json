@@ -1,0 +1,122 @@
+{
+  "cold_start": true,
+  "cache_mib": 12224,
+  "stock llama.cpp": {
+    "config": {
+      "threads": 2,
+      "load_mode": "mmap",
+      "repack": 0,
+      "ngl": 0
+    },
+    "ok": true,
+    "wall_s": 51.7,
+    "peak_rss_gb": 15.15,
+    "storage_read_gb": 20.92,
+    "tg_tok_s": 3.8,
+    "tg_stddev": 0.0,
+    "backend": "CPU",
+    "build": "caa8191df",
+    "label": "stock llama.cpp"
+  },
+  "PocketLLM engine": {
+    "config": {
+      "threads": 2,
+      "load_mode": "mmap",
+      "repack": 0,
+      "ngl": 0
+    },
+    "ok": true,
+    "wall_s": 51.5,
+    "peak_rss_gb": 15.32,
+    "storage_read_gb": 20.48,
+    "pocket": "pocket: tokens=16 layers=48 maps=1 advise_calls=18816 advise_gb=17.89 pred_hit=0.0% (0/0) pinned_mib=0",
+    "tg_tok_s": 4.61,
+    "tg_stddev": 0.0,
+    "backend": "CPU",
+    "build": "caa8191df",
+    "label": "PocketLLM engine"
+  },
+  "PocketLLM engine v2": {
+    "config": {
+      "threads": 2,
+      "load_mode": "mmap",
+      "repack": 0,
+      "ngl": 0
+    },
+    "ok": true,
+    "wall_s": 54.6,
+    "peak_rss_gb": 15.46,
+    "storage_read_gb": 21.21,
+    "pocket": "pocket: tokens=16 layers=48 maps=1 advise_calls=408 advise_gb=0.36 pred_hit=86.4% (4871/5640) pinned_mib=0 | pocket: v2 cache_mib=6147/12224 hits=9199 misses=2244 fetched_gb=6.45 transient_mib=0 lookahead_hit=86.4%",
+    "tg_tok_s": 2.7,
+    "tg_stddev": 0.0,
+    "backend": "CPU",
+    "build": "caa8191df",
+    "label": "PocketLLM engine v2"
+  },
+  "speedup": 1.21,
+  "speedup_v2": 0.71,
+  "model": "Qwen3-30B-A3B-Q4_K_M.gguf",
+  "plan": {
+    "model": "Qwen3-30B-A3B",
+    "strategy": "expert_stream",
+    "verdict": "slow",
+    "ctx": 4096,
+    "n_gpu_layers": 0,
+    "n_cpu_moe": 0,
+    "no_mmap": false,
+    "est_tok_s_upper": null,
+    "bottleneck": "storage read speed (not measured)",
+    "notes": [
+      "PocketLLM expert streaming: only routed experts are read from the drive",
+      "4.9 GB of weights do not fit in RAM and are re-read from storage while generating",
+      "mmap mode: the drive must stay connected; unplugging it crashes the runtime"
+    ],
+    "args": [
+      "-m",
+      "/mnt/models/Qwen3-30B-A3B-Q4_K_M.gguf",
+      "-c",
+      "4096",
+      "-t",
+      "2",
+      "-ngl",
+      "0",
+      "-lm",
+      "mmap",
+      "--no-repack"
+    ],
+    "env": {
+      "POCKET_MOE": "1",
+      "POCKET_MOE_PREDICT": "0",
+      "POCKET_MOE_NORA": "1"
+    },
+    "gpu_gb": 0.0,
+    "ram_gb": 14.08,
+    "paged_gb": 4.87,
+    "kv_gb": 0.4
+  },
+  "host": {
+    "os": "Linux 6.17.0-1022-azure",
+    "cpu": "AMD EPYC 7763 64-Core Processor",
+    "cores": 2,
+    "cpu_flags": [
+      "avx",
+      "avx2",
+      "f16c",
+      "fma"
+    ],
+    "ram_gb": 16.8,
+    "ram_free_gb": 14.6,
+    "ram_bw_1thread_gbps": 45.24,
+    "gpus": [],
+    "drive": {
+      "path": "/home/runner/work/pocketllm/pocketllm/models",
+      "usb": null,
+      "removable": null,
+      "fs": "ext4",
+      "free_gb": 92.1,
+      "read_gbps": null,
+      "warning": null
+    }
+  }
+}
