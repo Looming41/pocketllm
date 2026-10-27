@@ -41,3 +41,10 @@ tok/s ≤ 메모리 대역폭 ÷ 토큰당 활성 바이트
 - **드라이버와 OS**: 장치를 "네트워크 장치"로 노출하면 커스텀 드라이버가 필요 없습니다(H1 방식의 장점).
 - **사업**: 하드웨어 마진 vs 소프트웨어 구독. 단기 수익은 "모든 로컬 AI 장치에서 동작하는 판정·튜닝·배포 계층"(B2B: 사내 오프라인 AI 키트)이 더 현실적입니다.
 - **법과 라이선스**: Llama Community License(MAU 조항, 표기 의무), Muse Glimmer(Apache 2.0)는 재배포에 유리합니다. 모델을 미리 탑재해 판매하려면 각 라이선스의 재배포 조항을 확인해야 합니다.
+
+## 5. NVIDIA GPU가 있는 노트북: Pulsar를 선택 백엔드로 (미검증)
+[giannisanni/pulsar](https://github.com/giannisanni/pulsar)(MIT, Rust + CUDA, Linux 전용)는 표준 llama.cpp GGUF를 그대로 읽습니다. NVMe에서 전문가를 io_uring으로 읽고, GPU VRAM과 호스트 RAM을 LFU 캐시로 씁니다. 2×16GB GPU에서 Qwen3-235B 5.3 tok/s를 보고합니다(README, `scripts/bench.sh` 기준).
+
+- **PocketLLM과의 관계:** 같은 GGUF와 같은 다중 드라이브 분할(심볼릭 링크로 묶은 split GGUF)을 쓰므로 드라이브 형식을 바꾸지 않고 백엔드만 바꿀 수 있습니다. 플래너가 "Linux + NVIDIA GPU + MoE가 VRAM보다 큼"일 때 후보로 제시하는 것이 목표입니다.
+- **아직 하지 않은 것:** 이 저장소의 빌드·CI 환경에는 NVIDIA GPU가 없어 Pulsar를 실행하거나 측정하지 못했습니다. 그래서 코드에 백엔드로 넣지 않았습니다. 넣기 전에 GPU 러너나 실제 노트북에서 `scripts/bench_openai.py`로 llama.cpp + PocketLLM 엔진과 같은 조건에서 비교해야 합니다.
+- **CPU·USB 환경과의 차이:** Pulsar의 앱 캐시와 lookahead는 빠른 NVMe와 GPU에서 이득이지만, 느린 USB + 작은 RAM 실험실에서는 같은 원리의 엔진 v2가 v1보다 느렸습니다(RESULTS R8). 하드웨어에 따라 백엔드를 고르는 이유입니다.

@@ -56,7 +56,7 @@ llama.cpp CPU 백엔드의 `MUL_MAT_ID`(MoE 행렬곱)에서 **스레드 0이 �
 | [EfficientMoE/MoE-Infinity](https://github.com/EfficientMoE/MoE-Infinity) (Apache-2.0) | 요청 단위 활성화 추적, 직전 활성화 기반 프리페치 | 직전 토큰 프리페치 `POCKET_MOE_PREVTOK=1` | 무작위 라우팅에서는 이득 없음(3.56) | 끔. 실모델 실험실에서 재측정 |
 | [giannisanni/pulsar](https://github.com/giannisanni/pulsar) | 전문가는 Q2_K, 나머지는 Q8_0 (`pulsar-quant --map "_exps.=q2_k"`) | `pocketllm requant --recipe experts-q2` (llama-quantize `--tensor-type`) | **Q4 4.15 → 9.34 tok/s (×2.3)**, 나머지를 Q4로 하면 13.76 (×3.3), top-k 4까지 더하면 18.72 (R9) | 프로비저닝에서 품질 검증 후 선택 |
 | Pulsar `.warm` 인기 전문가 기록 | 이전 실행의 라우팅 통계로 첫 토큰부터 인기 전문가를 미리 읽음 | `POCKET_MOE_STATS=파일` + `POCKET_MOE_WARM_MIB=N` | 무작위 라우팅에서 −18% (4.14 → 3.39, RESULTS R10). 학습된 라우터는 편향이 있어 실모델에서 재측정 | 끔 |
-| SwiftLM TurboQuant KV | 스트리밍할 때 KV 캐시를 줄이면 그만큼 가중치 캐시가 늘어남 | 플래너가 스트리밍·페이징일 때 `-fa on -ctk q8_0 -ctv q8_0` 자동 적용(KV 절반) | 문맥이 길수록 효과. 이 실험실(빈 문맥 16토큰)로는 측정 불가 | 자동 |
+| SwiftLM TurboQuant KV | 스트리밍할 때 KV 캐시를 줄이면 그만큼 가중치 캐시가 늘어남 | 플래너가 스트리밍·페이징일 때 `-fa on -ctk q8_0 -ctv q8_0` 자동 적용(KV 절반) | 8K 문맥에서 **0.44 → 4.83 tok/s (×11)**. RAM을 192MiB 늘린 f16 대조군은 1.30이라 메모리로 일부만 설명됨(RESULTS R11). 모델이 RAM에 다 들어갈 때는 오히려 느려서(67 → 53) 스트리밍일 때만 적용 | 스트리밍·페이징일 때 자동 |
 | [jhammant/expertflow](https://github.com/jhammant/expertflow) | 온도 기반 축출, 혼합 정밀도, KV 인식 예산 | 혼합 정밀도 → requant, KV 인식 예산 → 플래너 KV 자동 | README 수치는 예상치 | — |
 
 - **top-k 축소는 출력이 바뀝니다.** 엔진의 나머지 기능은 읽는 시점만 바꾸므로 출력이 동일합니다. top-k만 품질과 속도를 맞바꿉니다. 실제 모델에서 품질 손실을 `pocketllm qualify`(Meta 평가)로 잰 다음 허용 범위 안의 k만 제공해야 합니다.

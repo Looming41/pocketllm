@@ -140,6 +140,19 @@ A 32-token calibration run saved routing counts (`POCKET_MOE_STATS`). Each measu
 
 It was a loss here, as expected. A random-weight router has no favourite experts, so the census predicts nothing, and the warm reads compete with the reads the token actually needs. Pulsar measured a gain (19.2 → 25.1 tok/s on Qwen3.6-35B) because trained routers are skewed. It stays **off by default** and is in the real-model CI lab (config 12).
 
+### R11: q8_0 KV cache at long context (SwiftLM's TurboQuant lesson; `docs/results/stream_lab_kv*.json`)
+Same lab, PocketLLM v1, decode measured after an 8,192-token context (`llama-bench -d 8192 -fa 1`). The KV cache is 384 MiB in f16 and 204 MiB in q8_0:
+
+| config (1 drive) | tok/s | GB read |
+|---|---|---|
+| f16 KV, 1.5 GiB limit | 0.44 ± 0.01 | 23.4 |
+| **q8_0 KV, 1.5 GiB limit** (planner default when streaming) | **4.83 ± 0.09 (×11)** | 11.4 |
+| control: f16 KV, limit raised by 192 MiB | 1.30 (1 run) | 14.3 |
+
+Two cold runs each, except the control. Near a memory cliff, a few hundred MiB decide whether the routed experts' working set stays cached. The control shows that the freed memory explains **part** of the gain, but not all of it. f16 with the extra 192 MiB still reaches only 1.30 tok/s. We have not isolated the rest (KV bytes read per token, flash-attention buffers). SwiftLM saw the same order of effect on a real 126 GB model (0.32 → 4.16 tok/s at 40K context).
+
+With everything in RAM, q8_0 KV + flash attention was **slower** on this CPU (67.3 → 53.4 tok/s on the small test MoE at depth 2048). The planner therefore uses it only when weights are streamed or paged, and stays with f16 when the model fits.
+
 ### Caveats
 Loop devices have almost no access latency, unlike real USB flash, and real models route differently. These are **lab numbers**: the next step is the same measurement on a real laptop with real USB drives and a real MoE model (Qwen3-30B-A3B, Llama 4 Scout), using `scripts/usb_vs_ssd.sh` and `pocketllm tune`.
 

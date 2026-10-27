@@ -34,6 +34,7 @@ On fast internal storage (about 2 GB/s), the gain shrinks to noise (×0.98–1.6
 | + `pocketllm requant`: **Q2_K experts + Q8_0 rest** (Pulsar recipe) | **9.34 (×2.3)** | model 3.52 → 2.53 GB |
 | + Q2_K experts + Q4_K rest | **13.76 (×3.3)** | model 2.18 GB |
 | + top-k 4 of 8 experts per token (SwiftLM `SWIFTLM_TOP_K`) | **18.72 (×4.5)** | |
+| at 8K context: q8_0 instead of f16 KV cache (SwiftLM's KV lesson; planner default when streaming) | 0.44 → **4.83 (×11)** | R11; f16 control with +192 MiB RAM: 1.30 |
 | own LFU expert cache + router lookahead (Pulsar) | 1.65–3.55 (slower) | kept opt-in, matches SwiftLM's "don't cache experts in app memory" |
 
 Low-bit experts and top-k **change the model's output**. Unlike the streaming engine, they trade quality for speed and size, so a recipe goes on a drive only after `pocketllm qualify` passes on the provisioning station. When weights must be streamed, the planner also quantizes the KV cache to q8_0, following SwiftLM's long-context finding that every KV byte saved becomes page cache for weights. On Apple Silicon, MLX models run through SwiftLM's own `--stream-experts` backend.
