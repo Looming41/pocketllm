@@ -87,10 +87,10 @@ index 53d39d2..7232079 100644
      // reset current_chunk
 diff --git a/ggml/src/ggml-pocket.c b/ggml/src/ggml-pocket.c
 new file mode 100644
-index 0000000..642c592
+index 0000000..a982081
 --- /dev/null
 +++ b/ggml/src/ggml-pocket.c
-@@ -0,0 +1,571 @@
+@@ -0,0 +1,595 @@
 +// PocketLLM expert streaming - see ggml/include/ggml-pocket.h for the design.
 +#define _GNU_SOURCE
 +#include "ggml-pocket.h"
@@ -393,16 +393,23 @@ index 0000000..642c592
 +    return b;
 +}
 +
-+static void pk_pin(struct pk_layer * L, int e, int on) {
++// returns 1 if every projection of the expert was (un)locked
++static int pk_pin(struct pk_layer * L, int e, int on) {
++    int ok = 1;
 +    for (int k = 0; k < PK_KINDS; k++) {
 +        if (!L->data[k] || L->map[k] < 0) {
 +            continue;
 +        }
 +        const char * p = L->data[k] + (size_t) e * L->nb2[k];
-+        if (pk_lock_pages(p, L->nb2[k], on) != 0 && on && pk.verbose) {
-+            fprintf(stderr, "pocket: could not pin expert %d (memory lock limit?)\n", e);
++        if (pk_lock_pages(p, L->nb2[k], on) != 0) {
++            ok = 0;
 +        }
 +    }
++    if (!ok && on) {
++        // undo the partial lock so the expert is streamed like any other
++        pk_pin(L, e, 0);
++    }
++    return ok;
 +}
 +
 +// pin the globally most-routed experts up to the byte budget (greedy by count)
@@ -460,11 +467,28 @@ index 0000000..642c592
 +            for (size_t i = 0; i < n && want_any[i]; i++) {
 +                if (cs[i].l == l && cs[i].e == e) { want = 1; break; }
 +            }
-+            if (want && !L->pinned[e]) { pk_pin(L, e, 1); L->pinned[e] = 1; }
-+            else if (!want && L->pinned[e]) { pk_pin(L, e, 0); L->pinned[e] = 0; }
++            if (want && !L->pinned[e] && pk.pin_bytes) {
++                if (pk_pin(L, e, 1)) {
++                    L->pinned[e] = 1;
++                } else {
++                    // memory-lock limit (ulimit -l / working-set quota): stop pinning, keep streaming
++                    fprintf(stderr, "pocket: memory lock limit reached; hot-expert pinning disabled\n");
++                    pk.pin_bytes = 0;
++                }
++            } else if (!want && L->pinned[e]) {
++                pk_pin(L, e, 0);
++                L->pinned[e] = 0;
++            }
 +        }
 +    }
-+    pk.pinned_bytes = used;
++    (void) used;
++    pk.pinned_bytes = 0;
++    for (int l = 0; l <= pk.max_layer; l++) {   // report what is actually locked
++        struct pk_layer * L = &pk.layers[l];
++        for (int e = 0; L->pinned && e < L->n_expert; e++) {
++            if (L->pinned[e]) pk.pinned_bytes += pk_expert_bytes(L);
++        }
++    }
 +    free(want_any);
 +    free(cs);
 +}

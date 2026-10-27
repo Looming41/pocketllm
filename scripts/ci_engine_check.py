@@ -63,7 +63,7 @@ def main(bin_dir, model):
     p = subprocess.run([os.path.join(bin_dir, "llama-bench" + EXE), "-m", model, "-p", "0", "-n", "16", "-r", "1",
                         "-t", "2", "-ngl", "0", "-lm", "mmap", "--repack", "0", "-o", "json"],
                        env=env, capture_output=True, text=True, timeout=900)
-    line = next((l for l in p.stderr.splitlines() if l.startswith("pocket:")), "")
+    line = next((l for l in p.stderr.splitlines() if l.startswith("pocket: tokens=")), "")
     m = re.search(r"advise_calls=(\d+)", line)
     print(f"llama-bench exit={p.returncode}  {line or '(no pocket summary)'}")
     if p.returncode != 0 or not m or int(m.group(1)) == 0:
