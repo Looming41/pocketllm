@@ -24,10 +24,10 @@ def volume_roots() -> list:
         pats = ["/Volumes/*"]
     elif system == "Linux":
         pats = ["/media/*", "/media/*/*", "/run/media/*/*", "/mnt/*"]
-    elif system == "Windows":
-        return [f"{c}:\\" for c in "DEFGHIJKLMNOPQRSTUVWXYZ" if os.path.exists(f"{c}:\\")]
-    extra = os.environ.get("POCKETLLM_EXTRA_DRIVES", "")
     roots = [p for pat in pats for p in glob.glob(pat) if os.path.isdir(p)]
+    if system == "Windows":
+        roots = [f"{c}:\\" for c in "DEFGHIJKLMNOPQRSTUVWXYZ" if os.path.exists(f"{c}:\\")]
+    extra = os.environ.get("POCKETLLM_EXTRA_DRIVES", "")
     roots += [p for p in extra.split(os.pathsep) if p]
     return roots
 

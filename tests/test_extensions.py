@@ -98,6 +98,11 @@ class TestSecurity(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.d)
 
+    def test_manifest_paths_are_portable(self):
+        m = json.load(open(os.path.join(self.root, security.MANIFEST)))
+        self.assertIn("models/m.gguf", m["files"])
+        self.assertFalse(any("\\" in k for k in m["files"]))
+
     def test_clean_drive_verifies(self):
         r = security.verify(self.root, "full", self.pub)
         self.assertTrue(r["ok"], r)

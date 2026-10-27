@@ -159,13 +159,14 @@ def _walk(root: str):
             p = os.path.join(dp, fn)
             if os.path.islink(p):
                 continue
-            yield os.path.relpath(p, root)
+            # manifest paths always use "/" so a drive sealed on one OS verifies on another
+            yield os.path.relpath(p, root).replace(os.sep, "/")
 
 
 def build_manifest(root: str, progress=print) -> dict:
     files = {}
     for rel in _walk(root):
-        p = os.path.join(root, rel)
+        p = os.path.join(root, *rel.split("/"))
         files[rel] = {"size": os.path.getsize(p), "sha256": _hash_file(p, quick=False),
                       "quick": _hash_file(p, quick=True)}
         progress(f"  hashed {rel}")
@@ -219,7 +220,7 @@ def verify(root: str, mode: str = "quick", trusted_pubkey: str | None = None) ->
         return res
     present = set(_walk(root))
     for rel, meta in m["files"].items():
-        p = os.path.join(root, rel)
+        p = os.path.join(root, *rel.split("/"))
         if rel not in present:
             res["missing"].append(rel)
             continue
