@@ -62,7 +62,8 @@ USB drive(s)  ── storage + read bandwidth only ──▶  host laptop (does 
 
 ## Status and honest limits
 - Every number above comes from an emulated low-RAM machine with throttled loop devices standing in for USB drives, running a **random-weight** MoE model. The model's routing statistics differ from real models, so prediction and pinning still need testing on real models such as Qwen3-30B-A3B and Llama 4 Scout. **No real model has been run yet** because model downloads were blocked in the build environment.
-- The engine runs on Linux (tested here). The macOS path (`F_RDADVISE`, or `POCKET_MOE_IO_THREADS`) and the Windows path (`PrefetchVirtualMemory` + `VirtualLock`) cross-compile cleanly (zig cc, `-Wall -Wextra`). They are built and tested natively, with MSVC on Windows, by the GitHub Actions workflow (`.github/workflows/ci.yml`), which also uploads per-OS binaries for the drive. Windows has no equivalent of `MADV_RANDOM`, so the read-around fix does not apply there.
+- **CI (GitHub Actions) builds and tests on Linux, macOS (Apple Silicon) and Windows (MSVC)**: unit tests plus an engine check, in which the engine reports activity and its greedy output is identical with the engine off and on. CI also uploads per-OS binaries for the drive (`pocketllm-bin-<os>` artifacts). CI proves that the engine works on each OS. It does **not** measure speed on a real Mac or Windows laptop with USB drives. Windows has no equivalent of `MADV_RANDOM`, so the read-around fix does not apply there.
+- CI found two real bugs that root-only local tests missed. First, an expert whose mlock failed under a normal user's limit was still marked as pinned, so it was never prefetched. Second, manifest paths written on Windows used backslashes, so a drive sealed on one OS failed verification on another. Both are fixed and covered by tests.
 - llama.cpp RPC has no authentication or encryption. Use it only on a dedicated link.
 - This is not a security-certified product.
 
