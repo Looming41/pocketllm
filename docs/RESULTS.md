@@ -225,4 +225,21 @@ Requantized (Q2_K experts + Q8_0, 11.2 GB), 1 drive, lazy load: v1 1.79, v2 1.53
 * **On a fast disk, lazy load was much worse**: stock 3.91, engine with lazy load 1.33 tok/s (fast-disk A/B in the same run; R13/R14 had 4.61–4.76 without it). With RAM for most of the model and a fast disk, one sequential whole-file read beats on-demand random reads. So lazy load is **opt-in**, and the planner turns it on only below 1 GB/s measured drive speed.
 * Local check after making it opt-in (random-weight model, 1 run): engine default 4.67 tok/s / 5.2 GB read; slow-drive settings 6.53 tok/s / 1.6 GB read.
 
+### R16: the planner's slow-drive settings, confirmed (CI run 40893017127)
+Lazy load is now opt-in, and the fast-disk A/B again uses the default. Same setup as R15:
+
+| config | 1 drive | 2 drives | read |
+|---|---|---|---|
+| stock llama.cpp | 0.07 ± 0.02 | 0.12 ± 0.00 | 159–201 GB |
+| v1 (engine default, whole-file read-ahead kept) | 0.64 ± 0.03 | 0.65 ± 0.16 | 55–62 GB |
+| **slow-drive default** (lazy load + dense weights locked) | **0.94 ± 0.00** | **1.31 ± 0.00** | 14 GB |
+| slow-drive default + top-k 4 | 1.47 ± 0.00 | 2.07 ± 0.01 | 9 GB |
+
+Requantized model (Q2_K experts + Q8_0, 11.2 GB), 1 drive: slow-drive default 1.86 ± 0.00, + top-k 4 **2.83 ± 0.01** tok/s.
+
+Fast disk A/B (planner default, no lazy load): stock 3.92, engine 4.68 (×1.19). This is back to the R13/R14 level, so making lazy load opt-in fixed the fast-disk regression.
+
+* The slow-drive numbers repeat R15 exactly (0.94 / 1.31).
+* On the requantized model, run 2's v2 + top-k 4 with whole-file read-ahead (3.51) was faster than the slow-drive default + top-k 4 here (2.83). The 11.2 GB model is much closer to fitting the 6 GiB budget than the 18.6 GB one. Where the switch between the two settings belongs, as a function of model size and RAM, is **not established yet**. The planner currently decides by drive speed only.
+
 ## Environment E1: target laptop. **TODO** (run `scripts/check_laptop.sh`, then `docs/TEST_PLAN_BIG_MODEL_KO.md`)
