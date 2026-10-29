@@ -46,7 +46,7 @@ cmake -S "$SRC" -B "$SRC/build-$BACKEND" "${FLAGS[@]}" || {
   cmake -S "$SRC" -B "$SRC/build-$BACKEND" "${FLAGS[@]/-DLLAMA_CURL=ON/-DLLAMA_CURL=OFF}"
 }
 JOBS=$( (command -v nproc >/dev/null && nproc) || sysctl -n hw.ncpu)
-cmake --build "$SRC/build-$BACKEND" -j "$JOBS" --target llama-server llama-cli llama-bench llama-gguf-split llama-quantize ggml-rpc-server
+cmake --build "$SRC/build-$BACKEND" -j "$JOBS" --target llama-server llama-cli llama-bench llama-gguf-split llama-quantize llama-perplexity ggml-rpc-server
 
 DEST="$ROOT/bin/$OS-$ARCH"
 mkdir -p "$DEST"

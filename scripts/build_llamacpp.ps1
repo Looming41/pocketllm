@@ -38,7 +38,7 @@ switch ($Backend) {
 }
 Run cmake $flags
 Run cmake @("--build", $Build, "--config", "Release", "-j", "$env:NUMBER_OF_PROCESSORS", "--target",
-            "llama-server", "llama-cli", "llama-bench", "llama-gguf-split", "llama-quantize", "ggml-rpc-server")
+            "llama-server", "llama-cli", "llama-bench", "llama-gguf-split", "llama-quantize", "llama-perplexity", "ggml-rpc-server")
 
 $Dest = Join-Path $Root "bin\windows-$Arch"
 New-Item -ItemType Directory -Force -Path $Dest | Out-Null

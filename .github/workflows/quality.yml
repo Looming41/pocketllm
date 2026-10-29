@@ -1,0 +1,104 @@
+name: quality-eval
+
+# Manual only: what do the speed recipes cost in quality? Downloads a real MoE model, builds the
+# requantized variants, and compares each against the original quantization with llama-perplexity
+# (KL divergence, same-top-token rate, perplexity on WikiText-2) and HellaSwag accuracy.
+# Results are committed to the `lab-results` branch.
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: "Model preset (scripts/fetch_model.py)"
+        default: qwen3-30b-a3b
+        type: choice
+        options: [olmoe, qwen3-30b-a3b, gpt-oss-20b]
+      chunks:
+        description: "WikiText-2 chunks of 512 tokens for KL divergence / perplexity"
+        default: "16"
+      hellaswag_tasks:
+        description: "HellaSwag tasks per variant (0 = skip)"
+        default: "100"
+
+permissions:
+  contents: write
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          df -h / /mnt
+      - name: Build llama.cpp + engine
+        run: scripts/build_llamacpp.sh cpu
+      - name: Download model and evaluation data
+        id: model
+        run: |
+          python -m pip install --quiet huggingface_hub
+          sudo mkdir -p /mnt/models /mnt/data && sudo chown $USER /mnt/models /mnt/data
+          M=$(python scripts/fetch_model.py ${{ inputs.model }} /mnt/models --max-gb 25)
+          echo "path=$M" >> "$GITHUB_OUTPUT"
+          cd /mnt/data
+          curl -sSfL -o wikitext.zip https://huggingface.co/datasets/ggml-org/ci/resolve/main/wikitext-2-raw-v1.zip
+          unzip -q wikitext.zip
+          curl -sSfL -o hellaswag_val_full.txt \
+            https://raw.githubusercontent.com/klosax/hellaswag_text_data/main/hellaswag_val_full.txt
+          ls -la /mnt/data /mnt/data/wikitext-2-raw
+      - name: Published low-bit quant for comparison (made from BF16 with an importance matrix)
+        id: ref2
+        if: ${{ inputs.model == 'qwen3-30b-a3b' }}
+        continue-on-error: true
+        run: |
+          P=$(python - <<'PY'
+          from huggingface_hub import HfApi, hf_hub_download
+          files = HfApi().list_repo_files("unsloth/Qwen3-30B-A3B-GGUF")
+          pick = [f for f in files if f.endswith(".gguf") and "UD-Q2_K_XL" in f and "/" not in f]
+          print(hf_hub_download("unsloth/Qwen3-30B-A3B-GGUF", pick[0], local_dir="/mnt/models") if pick else "")
+          PY
+          )
+          echo "path=$P" >> "$GITHUB_OUTPUT"
+          echo "published quant: $P"
+      - name: Requantize (routed experts in fewer bits)
+        run: |
+          export POCKETLLM_BIN=bin/linux-x64
+          M="${{ steps.model.outputs.path }}"
+          mkdir -p results
+          for r in experts-q2 experts-q2-small experts-q3; do
+            python -m pocketllm requant "$M" --recipe $r --out /mnt/models/$r.gguf | tee -a results/requant.log
+          done
+          df -h /mnt
+      - name: Quality vs the original quantization
+        timeout-minutes: 290
+        run: |
+          M="${{ steps.model.outputs.path }}"
+          HS=""
+          if [ "${{ inputs.hellaswag_tasks }}" != "0" ]; then
+            HS="--hellaswag /mnt/data/hellaswag_val_full.txt --hellaswag-tasks ${{ inputs.hellaswag_tasks }}"
+          fi
+          python scripts/quality_eval.py --bin bin/linux-x64 --ref "$M" \
+            --text /mnt/data/wikitext-2-raw/wiki.test.raw --chunks ${{ inputs.chunks }} $HS \
+            --variant "Q2_K experts + Q8_0 rest=/mnt/models/experts-q2.gguf" \
+            --variant "Q2_K experts + Q4_K rest=/mnt/models/experts-q2-small.gguf" \
+            --variant "Q3_K experts + Q8_0 rest=/mnt/models/experts-q3.gguf" \
+            --variant "Q2_K experts + Q8_0 rest, top-k 4=/mnt/models/experts-q2.gguf:POCKET_MOE_TOPK=4" \
+            ${{ steps.ref2.outputs.path && format('--variant "published UD-Q2_K_XL (unsloth)={0}"', steps.ref2.outputs.path) || '' }} \
+            --variant "top-k 6=$M:POCKET_MOE_TOPK=6" \
+            --variant "top-k 4=$M:POCKET_MOE_TOPK=4" \
+            --workdir /mnt/qwork --out results/quality.json | tee results/quality.log
+      - name: Report
+        if: always()
+        run: |
+          if [ -f results/quality.json ]; then
+            python scripts/quality_eval.py --report results/quality.json | tee results/quality.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+          mkdir -p results/logs && cp /mnt/qwork/*.log results/logs/ 2>/dev/null || true
+      - if: always()
+        uses: ./.github/actions/push-results
+        with:
+          name: quality
