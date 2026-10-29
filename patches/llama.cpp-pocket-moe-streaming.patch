@@ -1,9 +1,9 @@
 diff --git a/ggml/include/ggml-pocket.h b/ggml/include/ggml-pocket.h
 new file mode 100644
-index 0000000..10d8f4d
+index 0000000..814161b
 --- /dev/null
 +++ b/ggml/include/ggml-pocket.h
-@@ -0,0 +1,60 @@
+@@ -0,0 +1,66 @@
 +// PocketLLM expert streaming for memory-mapped MoE models on the CPU.
 +//
 +// When a MoE model is larger than RAM, llama.cpp memory-maps it and the OS
@@ -30,6 +30,8 @@ index 0000000..10d8f4d
 +//                            POCKET_MOE_FETCH_THREADS (default 16) parallel pread()s (POSIX only)
 +//   POCKET_MOE_LOOKAHEAD=0|1 v2: prefetch the next layer's experts by running its router on the
 +//                            current input (default 0)
++//   POCKET_MOE_PIN_TRUNK=1   lock the dense (non-expert) weights in RAM so streamed experts cannot
++//                            evict them (kimi-k3-in-c: give the trunk memory before any cache)
 +//   POCKET_MOE_WARM_MIB=N    warm start: right after the first token, prefetch the experts that
 +//                            POCKET_MOE_STATS says are used most, up to N MiB
 +//   POCKET_MOE_PREVTOK=1     also prefetch the experts the next layer used for the previous token
@@ -60,6 +62,10 @@ index 0000000..10d8f4d
 +GGML_API void ggml_pocket_router_hint(const struct ggml_tensor * w);
 +
 +GGML_API bool ggml_pocket_enabled(void);
++
++// model loader: a weight tensor was bound to the mapping. Non-expert ("trunk") tensors are
++// used by every token: read them ahead, and lock them in RAM with POCKET_MOE_PIN_TRUNK=1
++GGML_API void ggml_pocket_trunk_hint(const char * name, const void * data, size_t size);
 +
 +#ifdef __cplusplus
 +}
@@ -126,10 +132,10 @@ index 53d39d2..1933108 100644
  
 diff --git a/ggml/src/ggml-pocket.c b/ggml/src/ggml-pocket.c
 new file mode 100644
-index 0000000..ab56340
+index 0000000..2d4a5b0
 --- /dev/null
 +++ b/ggml/src/ggml-pocket.c
-@@ -0,0 +1,999 @@
+@@ -0,0 +1,1028 @@
 +// PocketLLM expert streaming - see ggml/include/ggml-pocket.h for the design.
 +#define _GNU_SOURCE
 +#include "ggml-pocket.h"
@@ -251,6 +257,8 @@ index 0000000..ab56340
 +    int    init;
 +    int    enabled, predict, verbose, no_readaround, io_threads, prevtok;
 +    size_t pin_bytes, warm_bytes;
++    int    pin_trunk;
++    size_t trunk_bytes, trunk_locked;
 +    char   stats_path[1024];
 +
 +    pk_mutex        lock;
@@ -291,6 +299,8 @@ index 0000000..ab56340
 +    pk.verbose = e && atoi(e) != 0;
 +    e = getenv("POCKET_MOE_PIN_MIB");
 +    pk.pin_bytes = e ? (size_t) atoll(e) << 20 : 0;
++    e = getenv("POCKET_MOE_PIN_TRUNK");
++    pk.pin_trunk = e && atoi(e) != 0;
 +    e = getenv("POCKET_MOE_WARM_MIB");
 +    pk.warm_bytes = e ? (size_t) atoll(e) << 20 : 0;
 +    e = getenv("POCKET_MOE_PREVTOK");
@@ -459,6 +469,31 @@ index 0000000..ab56340
 +#endif
 +    pk.advise_calls++;
 +    pk.advise_bytes += n;
++}
++
++void ggml_pocket_trunk_hint(const char * name, const void * data, size_t size) {
++    pk_init();
++    if (!pk.enabled || !name || !data || !size || strstr(name, "_exps")) {
++        return;  // routed experts are streamed on demand
++    }
++    if (strncmp(name, "token_embd", 10) == 0) {
++        return;  // a row lookup per token, not read in full
++    }
++    pk_lock(&pk.lock);
++    int m = pk_find_map(data);
++    pk.trunk_bytes += size;
++    if (m >= 0) {
++        pk_advise(m, (const char *) data, size);
++    }
++    if (pk.pin_trunk) {
++        if (pk_lock_pages(data, size, 1) == 0) {
++            pk.trunk_locked += size;
++        } else {
++            if (pk.verbose) fprintf(stderr, "pocket: cannot lock the dense weights (memory lock limit); not pinned\n");
++            pk.pin_trunk = 0;
++        }
++    }
++    pk_unlock(&pk.lock);
 +}
 +
 +static void pk_prefetch_expert(struct pk_layer * L, int e) {
@@ -937,12 +972,12 @@ index 0000000..ab56340
 +static void pk_save_stats(void) {
 +    if (pk.verbose) {
 +        fprintf(stderr, "pocket: tokens=%llu layers=%d maps=%d advise_calls=%llu advise_gb=%.2f "
-+                        "pred_hit=%.1f%% (%llu/%llu) pinned_mib=%.0f\n",
++                        "pred_hit=%.1f%% (%llu/%llu) pinned_mib=%.0f trunk_mib=%.0f trunk_locked_mib=%.0f\n",
 +                (unsigned long long) pk.tokens, pk.max_layer + 1, pk.n_maps,
 +                (unsigned long long) pk.advise_calls, pk.advise_bytes / 1e9,
 +                pk.pred_total ? 100.0 * pk.pred_hits / pk.pred_total : 0.0,
 +                (unsigned long long) pk.pred_hits, (unsigned long long) pk.pred_total,
-+                pk.pinned_bytes / 1048576.0);
++                pk.pinned_bytes / 1048576.0, pk.trunk_bytes / 1048576.0, pk.trunk_locked / 1048576.0);
 +    }
 +    if (pk.verbose && pk.cache_budget) {
 +        fprintf(stderr, "pocket: v2 cache_mib=%.0f/%.0f hits=%llu misses=%llu fetched_gb=%.2f transient_mib=%.0f "
@@ -1130,7 +1165,7 @@ index 0000000..ab56340
 +    pk_unlock(&pk.lock);
 +}
 diff --git a/src/llama-model-loader.cpp b/src/llama-model-loader.cpp
-index a963f24..c7f0cc5 100644
+index a963f24..7e766f3 100644
 --- a/src/llama-model-loader.cpp
 +++ b/src/llama-model-loader.cpp
 @@ -1,3 +1,4 @@
@@ -1138,7 +1173,15 @@ index a963f24..c7f0cc5 100644
  #include "llama-model-loader.h"
  
  #include "ggml-alloc.h"
-@@ -1440,6 +1441,8 @@ void llama_model_loader::init_mappings(bool prefetch, llama_mlocks * mlock_mmaps
+@@ -1436,10 +1437,15 @@ void llama_model_loader::init_mappings(bool prefetch, llama_mlocks * mlock_mmaps
+                 }
+             }
+ 
+-            const size_t prefetch_size = prefetch && use_mmap ? -1 : 0;
++            // PocketLLM: with expert streaming on, do not populate/read ahead the whole file at load
++            // (for a model larger than RAM that reads everything once and evicts it again); the
++            // dense "trunk" tensors are read ahead one by one below instead (ggml_pocket_trunk_hint)
++            const size_t prefetch_size = prefetch && use_mmap && !ggml_pocket_enabled() ? -1 : 0;
  
              std::unique_ptr<llama_mmap> mapping = std::make_unique<llama_mmap>(file.get(), prefetch_size, is_numa,
                      lazy.for_file(idx));
@@ -1147,6 +1190,14 @@ index a963f24..c7f0cc5 100644
              mmaps_used.emplace_back(mapping->size(), 0);
              if (mlock_mmaps) {
                  std::unique_ptr<llama_mlock> mlock_mmap(new llama_mlock());
+@@ -1730,6 +1736,7 @@ bool llama_model_loader::load_all_data(
+             GGML_ASSERT(buf_mmap || cur->data); // either we have a buffer to allocate the tensor in, or it is already allocated
+             if (buf_mmap && cur->data == nullptr) {
+                 ggml_backend_tensor_alloc(buf_mmap, cur, data);
++                ggml_pocket_trunk_hint(ggml_get_name(cur), data, n_size);
+ 
+                 // locking a lazy tensor would fault all of it in, which is what lazy avoids
+                 if (lmlocks && !lazy.has(cur)) {
 diff --git a/src/llama-model.cpp b/src/llama-model.cpp
 index 78a387e..14ad52f 100644
 --- a/src/llama-model.cpp

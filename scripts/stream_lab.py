@@ -167,6 +167,9 @@ CONFIGS = [
      {"POCKET_MOE": "1", "POCKET_MOE_NORA": "1", "LAB_ARGS": "-d 8192 -fa 1 -ctk q8_0 -ctv q8_0"}),       # 14
     ("v2 cache + top-k 4 (quality trade-off)", {"POCKET_MOE": "1", "POCKET_MOE_NORA": "1", "POCKET_MOE_CACHE_MIB": "@cache",
                                                 "POCKET_MOE_LOOKAHEAD": "0", "POCKET_MOE_TOPK": "4"}),  # 15
+    ("v1 + dense weights locked in RAM", {"POCKET_MOE": "1", "POCKET_MOE_NORA": "1", "POCKET_MOE_PIN_TRUNK": "1"}),  # 16
+    ("v2 cache + dense weights locked in RAM", {"POCKET_MOE": "1", "POCKET_MOE_NORA": "1", "POCKET_MOE_CACHE_MIB": "@cache",
+                                                "POCKET_MOE_LOOKAHEAD": "0", "POCKET_MOE_PIN_TRUNK": "1"}),  # 17
 ]
 
 
