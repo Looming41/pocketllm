@@ -38,6 +38,8 @@ Second run (R14), 1 drive: v2 + top-k 4 reaches **1.61 tok/s**. The model requan
 
 On a real router, the v2 cache hits 64% of expert lookups, so it beats v1. On random-weight models it lost, which is why the default is now chosen by drive speed. On a fast unthrottled disk, v1 is ×1.21 over stock and v2 is slower (R13).
 
+**Update (R15, idea from kimi-k3-in-c):** most of the drive traffic was llama.cpp reading the whole model file ahead at load, under memory pressure. On slow drives the planner now skips that, and reads ahead and locks only the dense weights: **0.94 tok/s with 1 drive, 1.31 with 2** (stock 0.08), and drive reads fall from 56 to 14 GB. The v2 cache no longer wins once this is in place.
+
 ### Ideas taken from Pulsar, SwiftLM and ExpertFlow (R8, R9, same lab, 1 drive)
 
 | what (source) | decode | note |

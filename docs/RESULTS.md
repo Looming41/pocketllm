@@ -204,4 +204,25 @@ The same model requantized to **Q2_K experts + Q8_0 rest** (`pocketllm requant`,
 * From stock llama.cpp (0.08 tok/s, R12) to Q2 experts + v2 + top-k 4 (3.51 tok/s) is about **×44** on one 300 MB/s drive. The last two steps trade quality for speed, and that loss **is not measured yet**: the requant came from a Q4 file, and no eval was run. Measuring it is the next step (`pocketllm qualify` on the provisioning station).
 * Fast disk A/B, second run: stock 3.43, v1 4.76 (×1.39), v2 1.90 (×0.55). This confirms R13: no v2 on fast storage.
 
+### R15: the missing reads were llama.cpp's load-time read-ahead (kimi-k3-in-c's "trunk first", CI run 40883318760)
+With `-lm mmap`, llama.cpp `MAP_POPULATE`s and `WILLNEED`s **the whole model file** at load. For an 18.6 GB model under a 6 GiB limit, it reads everything once and evicts it again before the first token. The engine now has `POCKET_MOE_LAZY_LOAD=1`, which skips that read-ahead and reads ahead only the dense (non-expert) tensors, and `POCKET_MOE_PIN_TRUNK=1`, which locks those dense tensors in RAM so streamed experts cannot evict them. kimi-k3-in-c measured "give the trunk memory before any expert cache" as 1.69× at equal total memory.
+
+Real Qwen3-30B-A3B, 6 GiB, 300 MB/s drives, 16 tokens, 2 cold runs (this CI run had lazy load on in every engine config):
+
+| config | 1 drive | 2 drives | read |
+|---|---|---|---|
+| stock llama.cpp | 0.08 | 0.07 | 163–239 GB |
+| v1, before (R12) | 0.63 | 0.66 | 56–62 GB |
+| v1 + lazy load | 0.83 ± 0.01 | 1.18 ± 0.00 | 15 GB |
+| **v1 + lazy load + dense weights locked** | **0.94 ± 0.00 (×11)** | **1.31 ± 0.00 (×19.7)** | 14 GB |
+| v2 cache + lazy load | 0.74 ± 0.00 | 1.03 ± 0.00 | 17 GB |
+| v2 cache + lazy load + locked | 0.79 ± 0.01 | 1.09 ± 0.01 | 16 GB |
+
+Requantized (Q2_K experts + Q8_0, 11.2 GB), 1 drive, lazy load: v1 1.79, v2 1.53, v2 + top-k 4 2.46 tok/s.
+
+* Drive reads fell from 56 to 14 GB for the same 16 tokens, and two drives now help: 0.94 → 1.31.
+* With the read-ahead gone, **v1 beats the v2 cache again**. R12's v2 win partly came from v2 surviving the load-time flood better. The planner now uses lazy load + locked dense weights on slow drives, not v2.
+* **On a fast disk, lazy load was much worse**: stock 3.91, engine with lazy load 1.33 tok/s (fast-disk A/B in the same run; R13/R14 had 4.61–4.76 without it). With RAM for most of the model and a fast disk, one sequential whole-file read beats on-demand random reads. So lazy load is **opt-in**, and the planner turns it on only below 1 GB/s measured drive speed.
+* Local check after making it opt-in (random-weight model, 1 run): engine default 4.67 tok/s / 5.2 GB read; slow-drive settings 6.53 tok/s / 1.6 GB read.
+
 ## Environment E1: target laptop. **TODO** (run `scripts/check_laptop.sh`, then `docs/TEST_PLAN_BIG_MODEL_KO.md`)
