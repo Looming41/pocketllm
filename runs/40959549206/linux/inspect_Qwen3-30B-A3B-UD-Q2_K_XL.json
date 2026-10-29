@@ -1,0 +1,17 @@
+{
+  "name": "Qwen3-30B-A3B",
+  "arch": "qwen3moe",
+  "files": [
+    "Qwen3-30B-A3B-UD-Q2_K_XL.gguf"
+  ],
+  "file_gb": 11.81,
+  "params_b": 30.53,
+  "n_layer": 48,
+  "moe": true,
+  "n_expert": 128,
+  "n_expert_used": 8,
+  "expert_gb": 10.79,
+  "active_gb_per_token": 1.519,
+  "kv_mb_per_1k_ctx": 100.7,
+  "train_ctx": 40960
+}

@@ -1,0 +1,132 @@
+{
+  "cold_start": true,
+  "cache_mib": 12384,
+  "stock llama.cpp": {
+    "config": {
+      "threads": 2,
+      "load_mode": "mmap",
+      "repack": 0,
+      "ngl": 0
+    },
+    "ok": true,
+    "wall_s": 50.7,
+    "peak_rss_gb": 14.53,
+    "storage_read_gb": 20.81,
+    "tg_tok_s": 3.91,
+    "tg_stddev": 0.0,
+    "backend": "CPU",
+    "build": "caa8191df",
+    "label": "stock llama.cpp"
+  },
+  "PocketLLM engine": {
+    "config": {
+      "threads": 2,
+      "load_mode": "mmap",
+      "repack": 0,
+      "ngl": 0
+    },
+    "ok": true,
+    "wall_s": 50.7,
+    "peak_rss_gb": 14.91,
+    "storage_read_gb": 20.39,
+    "pocket": "pocket: tokens=16 layers=48 maps=1 advise_calls=19250 advise_gb=18.72 pred_hit=0.0% (0/0) pinned_mib=0 trunk_mib=784 trunk_locked_mib=0",
+    "tg_tok_s": 4.95,
+    "tg_stddev": 0.0,
+    "backend": "CPU",
+    "build": "caa8191df",
+    "label": "PocketLLM engine"
+  },
+  "PocketLLM engine v2": {
+    "config": {
+      "threads": 2,
+      "load_mode": "mmap",
+      "repack": 0,
+      "ngl": 0
+    },
+    "ok": true,
+    "wall_s": 58.0,
+    "peak_rss_gb": 15.11,
+    "storage_read_gb": 21.43,
+    "pocket": "pocket: tokens=16 layers=48 maps=1 advise_calls=842 advise_gb=1.19 pred_hit=86.4% (4871/5640) pinned_mib=0 trunk_mib=784 trunk_locked_mib=0 | pocket: v2 cache_mib=6147/12384 hits=9190 misses=2244 fetched_gb=6.45 transient_mib=0 lookahead_hit=86.4%",
+    "tg_tok_s": 1.67,
+    "tg_stddev": 0.0,
+    "backend": "CPU",
+    "build": "caa8191df",
+    "label": "PocketLLM engine v2"
+  },
+  "speedup": 1.27,
+  "speedup_v2": 0.43,
+  "model": "Qwen3-30B-A3B-Q4_K_M.gguf",
+  "plan": {
+    "model": "Qwen3-30B-A3B",
+    "strategy": "expert_stream",
+    "verdict": "slow",
+    "ctx": 4096,
+    "n_gpu_layers": 0,
+    "n_cpu_moe": 0,
+    "no_mmap": false,
+    "est_tok_s_upper": null,
+    "bottleneck": "storage read speed (not measured)",
+    "notes": [
+      "PocketLLM expert streaming: only routed experts are read from the drive",
+      "4.7 GB of weights do not fit in RAM and are re-read from storage while generating",
+      "mmap mode: the drive must stay connected; unplugging it crashes the runtime",
+      "q8_0 KV cache: 0.40 -> 0.21 GB, more RAM left for caching weights"
+    ],
+    "args": [
+      "-m",
+      "/mnt/models/Qwen3-30B-A3B-Q4_K_M.gguf",
+      "-c",
+      "4096",
+      "-t",
+      "2",
+      "-ngl",
+      "0",
+      "-fa",
+      "on",
+      "-ctk",
+      "q8_0",
+      "-ctv",
+      "q8_0",
+      "-lm",
+      "mmap",
+      "--no-repack"
+    ],
+    "env": {
+      "POCKET_MOE": "1",
+      "POCKET_MOE_PREDICT": "0",
+      "POCKET_MOE_NORA": "1"
+    },
+    "backend": "llama",
+    "topk": null,
+    "kv_type": "q8_0",
+    "gpu_gb": 0.0,
+    "ram_gb": 14.08,
+    "paged_gb": 4.69,
+    "kv_gb": 0.21
+  },
+  "host": {
+    "os": "Linux 7.0.0-1017-azure",
+    "cpu": "AMD EPYC 7763 64-Core Processor",
+    "cores": 2,
+    "cpu_flags": [
+      "avx",
+      "avx2",
+      "f16c",
+      "fma"
+    ],
+    "ram_gb": 16.8,
+    "ram_free_gb": 14.8,
+    "ram_bw_1thread_gbps": 40.56,
+    "gpus": [],
+    "drive": {
+      "path": "/home/runner/work/pocketllm/pocketllm/models",
+      "usb": null,
+      "removable": null,
+      "fs": "ext4",
+      "free_gb": 66.4,
+      "read_gbps": null,
+      "warning": null
+    }
+  }
+}
