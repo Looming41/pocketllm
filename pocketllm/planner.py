@@ -175,7 +175,7 @@ def _speed(cpu_active, paged_active, b: Budget, gpu_active=0):
 
 
 KV_BYTES = {"f16": 2.0, "q8_0": 1.0625}  # bytes per element
-V2_MAX_DISK_BW = 1.0 * GB  # below this drive speed the engine's own expert cache beat v1 (real-model lab)
+SLOW_DRIVE_BW = 1.0 * GB  # below this measured drive speed, use the slow-drive settings (real-model lab)
 
 
 def plan(spec: ModelSpec, b: Budget, ctx: int = 4096, allow_paging: bool = True, topk: int | None = None,
@@ -316,14 +316,15 @@ def _finish_cpu_side(p: Plan, spec, b: Budget, cpu_bytes, cpu_active, ram_for_we
         p.strategy = "expert_stream"
         p.env = {"POCKET_MOE": "1", "POCKET_MOE_PREDICT": "0", "POCKET_MOE_NORA": "1"}
         p.notes.append("PocketLLM expert streaming: only routed experts are read from the drive")
-        if b.disk_bw and b.disk_bw < V2_MAX_DISK_BW:
-            # slow drive: the engine's own expert cache (v2) keeps the experts a trained router
-            # keeps re-picking. Real Qwen3-30B-A3B, 300 MB/s drives: 0.63 -> 0.82 tok/s (1 drive),
-            # 0.66 -> 1.04 (2 drives). On a fast disk it was slower than v1 (4.61 -> 2.70).
-            dense = spec.total_bytes - sum(spec.layer_expert_bytes)
-            cache_mib = max(256, int((ram_for_weights - dense) / 2**20) - 768)
-            p.env["POCKET_MOE_CACHE_MIB"] = str(cache_mib)
-            p.notes.append(f"slow drive: engine expert cache {cache_mib} MiB (v2; Windows falls back to v1)")
+        if b.disk_bw and b.disk_bw < SLOW_DRIVE_BW:
+            # slow drive (real Qwen3-30B-A3B, 6 GiB RAM, 300 MB/s, R15): skip llama.cpp's whole-file
+            # read-ahead at load and lock the dense weights in RAM: 0.63 -> 0.94 tok/s (1 drive),
+            # 0.66 -> 1.31 (2 drives), drive reads 56 -> 14 GB. On a fast disk the whole-file
+            # read-ahead wins (4.76 vs 1.33), so this is for slow drives only. The engine's own
+            # expert cache (v2) was slower than this in the same run (0.79 / 1.09).
+            p.env.update(POCKET_MOE_LAZY_LOAD="1", POCKET_MOE_PIN_TRUNK="1")
+            p.notes.append("slow drive: only the dense weights are read ahead and locked in RAM; "
+                           "experts are read when the router picks them")
     miss = paged / cpu_bytes  # share of CPU-side weights that are not resident at any moment
     p.est_tok_s_upper, p.bottleneck = _speed(cpu_active * (1 - miss), cpu_active * miss, b, gpu_active)
     p.notes.append(f"{paged / GB:.1f} GB of weights do not fit in RAM and are re-read from storage while generating")

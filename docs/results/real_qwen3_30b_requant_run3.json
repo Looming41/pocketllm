@@ -1,0 +1,76 @@
+{
+  "model": "requant-E2R8.gguf",
+  "model_gb": 11.19,
+  "mem_mib": 6144,
+  "drive_mbps": 300,
+  "n_gen": 16,
+  "threads": 4,
+  "runs": [
+    {
+      "ok": true,
+      "wall_s": 18.2,
+      "pocket": "pocket: tokens=16 layers=48 maps=1 advise_calls=19250 advise_gb=11.06 pred_hit=0.0% (0/0) pinned_mib=0 trunk_mib=1282 trunk_locked_mib=0",
+      "tg_tok_s": 1.778,
+      "stddev": 0.0,
+      "drive_read_gb": 9.67,
+      "drives": 1,
+      "config": "expert prefetch + no read-around on experts",
+      "rep": 0
+    },
+    {
+      "ok": true,
+      "wall_s": 18.2,
+      "pocket": "pocket: tokens=16 layers=48 maps=1 advise_calls=19250 advise_gb=11.06 pred_hit=0.0% (0/0) pinned_mib=0 trunk_mib=1282 trunk_locked_mib=0",
+      "tg_tok_s": 1.795,
+      "stddev": 0.0,
+      "drive_read_gb": 9.65,
+      "drives": 1,
+      "config": "expert prefetch + no read-around on experts",
+      "rep": 1
+    },
+    {
+      "ok": true,
+      "wall_s": 20.0,
+      "pocket": "pocket: tokens=16 layers=48 maps=1 advise_calls=842 advise_gb=1.55 pred_hit=0.0% (0/0) pinned_mib=0 trunk_mib=1282 trunk_locked_mib=0 | pocket: v2 cache_mib=3054/3778 hits=4068 misses=2068 fetched_gb=3.20 transient_mib=0 lookahead_hit=0.0%",
+      "tg_tok_s": 1.518,
+      "stddev": 0.0,
+      "drive_read_gb": 10.62,
+      "drives": 1,
+      "config": "v2 cache (no lookahead)",
+      "rep": 0
+    },
+    {
+      "ok": true,
+      "wall_s": 19.8,
+      "pocket": "pocket: tokens=16 layers=48 maps=1 advise_calls=842 advise_gb=1.55 pred_hit=0.0% (0/0) pinned_mib=0 trunk_mib=1282 trunk_locked_mib=0 | pocket: v2 cache_mib=3054/3778 hits=4068 misses=2068 fetched_gb=3.20 transient_mib=0 lookahead_hit=0.0%",
+      "tg_tok_s": 1.533,
+      "stddev": 0.0,
+      "drive_read_gb": 10.57,
+      "drives": 1,
+      "config": "v2 cache (no lookahead)",
+      "rep": 1
+    },
+    {
+      "ok": true,
+      "wall_s": 13.3,
+      "pocket": "pocket: tokens=16 layers=48 maps=1 advise_calls=638 advise_gb=1.45 pred_hit=0.0% (0/0) pinned_mib=0 trunk_mib=1282 trunk_locked_mib=0 | pocket: v2 cache_mib=1900/3778 hits=1781 misses=1287 fetched_gb=1.99 transient_mib=0 lookahead_hit=0.0%",
+      "tg_tok_s": 2.448,
+      "stddev": 0.0,
+      "drive_read_gb": 7.71,
+      "drives": 1,
+      "config": "v2 cache + top-k 4 (quality trade-off)",
+      "rep": 0
+    },
+    {
+      "ok": true,
+      "wall_s": 13.4,
+      "pocket": "pocket: tokens=16 layers=48 maps=1 advise_calls=638 advise_gb=1.45 pred_hit=0.0% (0/0) pinned_mib=0 trunk_mib=1282 trunk_locked_mib=0 | pocket: v2 cache_mib=1900/3778 hits=1781 misses=1287 fetched_gb=1.99 transient_mib=0 lookahead_hit=0.0%",
+      "tg_tok_s": 2.464,
+      "stddev": 0.0,
+      "drive_read_gb": 7.8,
+      "drives": 1,
+      "config": "v2 cache + top-k 4 (quality trade-off)",
+      "rep": 1
+    }
+  ]
+}

@@ -25,7 +25,7 @@ on:
         default: true
       linux_configs:
         description: "stream_lab config indexes (scripts/stream_lab.py CONFIGS)"
-        default: "3,6,12,15"
+        default: "0,3,16,19"
       run_mac:
         description: "Also run the Apple Silicon jobs (10x minutes on private repos)"
         type: boolean
@@ -80,7 +80,7 @@ jobs:
           sudo rm -rf /mnt/lab
           sudo -E env "PATH=$PATH" python scripts/stream_lab.py --model /mnt/models/requant-E2R8.gguf \
             --llama-bin bin/linux-x64 --drives 1 --drive-mbps ${{ inputs.drive_mbps }} \
-            --mem-mib ${{ inputs.linux_mem_mib }} --n-gen 16 --reps 2 --configs 3,6,15 \
+            --mem-mib ${{ inputs.linux_mem_mib }} --n-gen 16 --reps 2 --configs 3,16,19 \
             --workdir /mnt/lab --out results/linux_usb_lab_requant.json | tee results/linux_usb_lab_requant.log
           sudo chown -R $USER results
           python scripts/lab_report.py results/linux_usb_lab_requant.json | tee results/linux_usb_lab_requant.md >> "$GITHUB_STEP_SUMMARY"

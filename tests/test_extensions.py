@@ -358,13 +358,15 @@ class TestRequantAndKV(unittest.TestCase):
 
 
 class TestStreamingEngineChoice(unittest.TestCase):
-    def test_v2_cache_only_on_slow_drives(self):
+    def test_slow_drive_settings_only_on_slow_drives(self):
         from pocketllm import planner
         spec = planner.ModelSpec.from_gguf(gguf.load(TEST_MOE), TEST_MOE)
         mk = lambda bw: planner.Budget(ram_budget=planner.COMPUTE_OVERHEAD + spec.total_bytes // 2, gpu_budget=0,  # noqa: E731
                                        unified=False, ram_bw=2e10, gpu_bw=None, disk_bw=bw, threads=4)
         slow, fast, unknown = planner.plan(spec, mk(3e8)), planner.plan(spec, mk(3e9)), planner.plan(spec, mk(None))
         self.assertEqual(slow.strategy, "expert_stream")
-        self.assertIn("POCKET_MOE_CACHE_MIB", slow.env)
-        self.assertNotIn("POCKET_MOE_CACHE_MIB", fast.env)
-        self.assertNotIn("POCKET_MOE_CACHE_MIB", unknown.env)
+        self.assertEqual(slow.env.get("POCKET_MOE_LAZY_LOAD"), "1")
+        self.assertEqual(slow.env.get("POCKET_MOE_PIN_TRUNK"), "1")
+        self.assertNotIn("POCKET_MOE_CACHE_MIB", slow.env)
+        for p in (fast, unknown):
+            self.assertNotIn("POCKET_MOE_LAZY_LOAD", p.env)
