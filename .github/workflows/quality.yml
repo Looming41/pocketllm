@@ -15,6 +15,11 @@ on:
       chunks:
         description: "WikiText-2 chunks of 512 tokens for KL divergence / perplexity"
         default: "16"
+      variant_set:
+        description: "full = every recipe; combos = the near-lossless ones and their top-k 6 combinations"
+        default: full
+        type: choice
+        options: [full, combos]
       hellaswag_tasks:
         description: "HellaSwag tasks per variant (0 = skip)"
         default: "100"
@@ -74,7 +79,9 @@ jobs:
           export POCKETLLM_BIN=bin/linux-x64
           M="${{ steps.model.outputs.path }}"
           mkdir -p results
-          for r in experts-q2 experts-q2-small experts-q3; do
+          RECIPES="experts-q2 experts-q2-small experts-q3"
+          [ "${{ inputs.variant_set }}" = combos ] && RECIPES="experts-q3"
+          for r in $RECIPES; do
             python -m pocketllm requant "$M" --recipe $r --out /mnt/models/$r.gguf | tee -a results/requant.log
           done
           df -h /mnt
@@ -88,15 +95,27 @@ jobs:
           if [ "${{ inputs.hellaswag_tasks }}" != "0" ]; then
             HS="--hellaswag /mnt/data/hellaswag_val_full.txt --hellaswag-tasks ${{ inputs.hellaswag_tasks }}"
           fi
+          UD="${{ steps.ref2.outputs.path }}"
+          V=()
+          if [ "${{ inputs.variant_set }}" = combos ]; then
+            V+=(--variant "Q3_K experts + Q8_0 rest=/mnt/models/experts-q3.gguf")
+            V+=(--variant "Q3_K experts + Q8_0 rest, top-k 6=/mnt/models/experts-q3.gguf:POCKET_MOE_TOPK=6")
+            if [ -n "$UD" ]; then
+              V+=(--variant "published UD-Q2_K_XL (unsloth)=$UD")
+              V+=(--variant "published UD-Q2_K_XL (unsloth), top-k 6=$UD:POCKET_MOE_TOPK=6")
+            fi
+            V+=(--variant "top-k 6=$M:POCKET_MOE_TOPK=6")
+          else
+            V+=(--variant "Q2_K experts + Q8_0 rest=/mnt/models/experts-q2.gguf")
+            V+=(--variant "Q2_K experts + Q4_K rest=/mnt/models/experts-q2-small.gguf")
+            V+=(--variant "Q3_K experts + Q8_0 rest=/mnt/models/experts-q3.gguf")
+            V+=(--variant "Q2_K experts + Q8_0 rest, top-k 4=/mnt/models/experts-q2.gguf:POCKET_MOE_TOPK=4")
+            if [ -n "$UD" ]; then V+=(--variant "published UD-Q2_K_XL (unsloth)=$UD"); fi
+            V+=(--variant "top-k 6=$M:POCKET_MOE_TOPK=6")
+            V+=(--variant "top-k 4=$M:POCKET_MOE_TOPK=4")
+          fi
           python scripts/quality_eval.py --bin bin/linux-x64 --ref "$M" \
-            --text /mnt/data/wikitext-2-raw/wiki.test.raw --chunks ${{ inputs.chunks }} $HS \
-            --variant "Q2_K experts + Q8_0 rest=/mnt/models/experts-q2.gguf" \
-            --variant "Q2_K experts + Q4_K rest=/mnt/models/experts-q2-small.gguf" \
-            --variant "Q3_K experts + Q8_0 rest=/mnt/models/experts-q3.gguf" \
-            --variant "Q2_K experts + Q8_0 rest, top-k 4=/mnt/models/experts-q2.gguf:POCKET_MOE_TOPK=4" \
-            ${{ steps.ref2.outputs.path && format('--variant "published UD-Q2_K_XL (unsloth)={0}"', steps.ref2.outputs.path) || '' }} \
-            --variant "top-k 6=$M:POCKET_MOE_TOPK=6" \
-            --variant "top-k 4=$M:POCKET_MOE_TOPK=4" \
+            --text /mnt/data/wikitext-2-raw/wiki.test.raw --chunks ${{ inputs.chunks }} $HS "${V[@]}" \
             --workdir /mnt/qwork --out results/quality.json 2>&1 | tee results/quality.log
       - name: Report
         if: always()

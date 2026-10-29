@@ -272,4 +272,18 @@ Each variant was compared with the original Q4_K_M file on the same text (`scrip
 
 The speed of these near-lossless variants is measured next.
 
+### R18: speed of the variants that passed the quality check (CI run 40959549206)
+Same lab as R12–R16: 6 GiB RAM, 300 MB/s drives, the planner's slow-drive settings, 16 tokens, 2 cold runs. The quality column is the mean KLD from R17. Stock llama.cpp on the original file: 0.08 / 0.12 tok/s.
+
+| model file | experts per token | 1 drive | 2 drives | quality (mean KLD) |
+|---|---|---|---|---|
+| Q4_K_M original, 18.6 GB | 8 | 0.94 | 1.31 | reference |
+| Q4_K_M original | 6 | 1.14 | 1.59 | 0.060 |
+| **Q3_K experts + Q8_0, 14.1 GB** | 8 | **1.40** | **1.96** | **0.064** |
+| Q3_K experts + Q8_0 | 6 | 1.67 | 2.35 | not measured together yet |
+| unsloth UD-Q2_K_XL, 11.8 GB | 8 | 1.54 | 2.17 | 0.127 |
+| unsloth UD-Q2_K_XL | 6 | 1.82 | 2.58 | not measured together yet |
+
+All runs had a standard deviation of 0.00–0.01 tok/s. The best variant with checked quality, **Q3_K experts**, is ×17.5 (1 drive) and ×16 (2 drives) over stock llama.cpp, with KLD 0.064 and HellaSwag 73% against 76%. The quality of the top-k 6 combinations is measured next (`quality.yml`, variant_set=combos).
+
 ## Environment E1: target laptop. **TODO** (run `scripts/check_laptop.sh`, then `docs/TEST_PLAN_BIG_MODEL_KO.md`)
