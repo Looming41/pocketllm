@@ -39,6 +39,11 @@ on:
 permissions:
   contents: write
 
+# explicit `shell: bash` runs steps with -eo pipefail, so a failure before `| tee` fails the step
+defaults:
+  run:
+    shell: bash
+
 jobs:
   linux-usb-lab:
     runs-on: ubuntu-latest

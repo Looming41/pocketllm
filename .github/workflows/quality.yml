@@ -22,6 +22,11 @@ on:
 permissions:
   contents: write
 
+# explicit `shell: bash` runs steps with -eo pipefail, so a failure before `| tee` fails the step
+defaults:
+  run:
+    shell: bash
+
 jobs:
   quality:
     runs-on: ubuntu-latest
@@ -41,7 +46,7 @@ jobs:
         id: model
         run: |
           python -m pip install --quiet huggingface_hub
-          sudo mkdir -p /mnt/models /mnt/data && sudo chown $USER /mnt/models /mnt/data
+          sudo mkdir -p /mnt/models /mnt/data /mnt/qwork && sudo chown $USER /mnt/models /mnt/data /mnt/qwork
           M=$(python scripts/fetch_model.py ${{ inputs.model }} /mnt/models --max-gb 25)
           echo "path=$M" >> "$GITHUB_OUTPUT"
           cd /mnt/data
@@ -76,7 +81,9 @@ jobs:
       - name: Quality vs the original quantization
         timeout-minutes: 290
         run: |
+          set -o pipefail
           M="${{ steps.model.outputs.path }}"
+          echo "published quant: '${{ steps.ref2.outputs.path }}'"
           HS=""
           if [ "${{ inputs.hellaswag_tasks }}" != "0" ]; then
             HS="--hellaswag /mnt/data/hellaswag_val_full.txt --hellaswag-tasks ${{ inputs.hellaswag_tasks }}"
@@ -90,7 +97,7 @@ jobs:
             ${{ steps.ref2.outputs.path && format('--variant "published UD-Q2_K_XL (unsloth)={0}"', steps.ref2.outputs.path) || '' }} \
             --variant "top-k 6=$M:POCKET_MOE_TOPK=6" \
             --variant "top-k 4=$M:POCKET_MOE_TOPK=4" \
-            --workdir /mnt/qwork --out results/quality.json | tee results/quality.log
+            --workdir /mnt/qwork --out results/quality.json 2>&1 | tee results/quality.log
       - name: Report
         if: always()
         run: |
