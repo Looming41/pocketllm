@@ -175,8 +175,9 @@ def make_handler(st: State):
                 prof = st.get_profile()
                 topk = None
                 if b.get("experts") == "fewer" and spec.n_expert_used > 1:
-                    # SwiftLM-style top-k reduction: half the routed experts per token (min 2)
-                    topk = max(2, spec.n_expert_used // 2) if spec.n_expert_used >= 4 else spec.n_expert_used - 1
+                    # top-k reduction to 3/4 of the routed experts: on Qwen3-30B-A3B, 6 of 8 measured
+                    # mean KLD 0.060 and HellaSwag 75% vs 76% (4 of 8: 0.299 and 71%), RESULTS R17
+                    topk = max(1, min(spec.n_expert_used - 1, -(-spec.n_expert_used * 3 // 4)))
                 pl = planner.plan(spec, core.budget(prof), ctx=int(b.get("ctx", 4096)), topk=topk)
                 if pl.verdict == "does_not_fit":
                     return self._json({"error": "does not fit", "plan": pl.to_dict()}, 400)

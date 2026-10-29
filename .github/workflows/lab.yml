@@ -25,7 +25,7 @@ on:
         default: true
       linux_configs:
         description: "stream_lab config indexes (scripts/stream_lab.py CONFIGS)"
-        default: "0,3,16,19"
+        default: "16,20"
       run_mac:
         description: "Also run the Apple Silicon jobs (10x minutes on private repos)"
         type: boolean
@@ -76,19 +76,34 @@ jobs:
             --workdir /mnt/lab --out results/linux_usb_lab.json | tee results/linux_usb_lab.log
           sudo chown -R $USER results
           python scripts/lab_report.py results/linux_usb_lab.json | tee results/linux_usb_lab.md >> "$GITHUB_STEP_SUMMARY"
-      - name: Requantized model (Q2_K experts, Q8_0 rest), 1 drive
+      - name: Smaller variants that passed the quality check (R17), 1 drive
         if: ${{ inputs.requant }}
         run: |
           export POCKETLLM_BIN=bin/linux-x64
           M="${{ steps.model.outputs.path }}"
-          python -m pocketllm requant "$M" --recipe experts-q2 --out /mnt/models/requant-E2R8.gguf | tee results/requant.log
-          sudo rm -rf /mnt/lab
-          sudo -E env "PATH=$PATH" python scripts/stream_lab.py --model /mnt/models/requant-E2R8.gguf \
-            --llama-bin bin/linux-x64 --drives 1 --drive-mbps ${{ inputs.drive_mbps }} \
-            --mem-mib ${{ inputs.linux_mem_mib }} --n-gen 16 --reps 2 --configs 3,16,19 \
-            --workdir /mnt/lab --out results/linux_usb_lab_requant.json | tee results/linux_usb_lab_requant.log
-          sudo chown -R $USER results
-          python scripts/lab_report.py results/linux_usb_lab_requant.json | tee results/linux_usb_lab_requant.md >> "$GITHUB_STEP_SUMMARY"
+          python -m pocketllm requant "$M" --recipe experts-q3 --out /mnt/models/experts-q3.gguf | tee results/requant.log
+          VARIANTS="/mnt/models/experts-q3.gguf"
+          if [ "${{ inputs.linux_model }}" = "qwen3-30b-a3b" ]; then
+            UD=$(python - <<'PY'
+          from huggingface_hub import HfApi, hf_hub_download
+          files = HfApi().list_repo_files("unsloth/Qwen3-30B-A3B-GGUF")
+          pick = [f for f in files if f.endswith(".gguf") and "UD-Q2_K_XL" in f and "/" not in f]
+          print(hf_hub_download("unsloth/Qwen3-30B-A3B-GGUF", pick[0], local_dir="/mnt/models") if pick else "")
+          PY
+            ) || UD=""
+            if [ -n "$UD" ]; then VARIANTS="$VARIANTS $UD"; fi
+          fi
+          for V in $VARIANTS; do
+            N=$(basename "$V" .gguf)
+            python -m pocketllm inspect "$V" | head -20 > "results/inspect_$N.json" || true
+            sudo rm -rf /mnt/lab
+            sudo -E env "PATH=$PATH" python scripts/stream_lab.py --model "$V" \
+              --llama-bin bin/linux-x64 --drives 1,2 --drive-mbps ${{ inputs.drive_mbps }} \
+              --mem-mib ${{ inputs.linux_mem_mib }} --n-gen 16 --reps 2 --configs 16,20 \
+              --workdir /mnt/lab --out "results/linux_usb_lab_$N.json" | tee "results/linux_usb_lab_$N.log"
+            sudo chown -R $USER results
+            python scripts/lab_report.py "results/linux_usb_lab_$N.json" | tee "results/linux_usb_lab_$N.md" >> "$GITHUB_STEP_SUMMARY"
+          done
       - name: Fast disk A/B (no drive throttle)
         run: |
           python -m pocketllm ab "${{ steps.model.outputs.path }}" --n-gen 16 --out results/linux_ab_fastdisk.json || true

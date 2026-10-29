@@ -31,10 +31,17 @@ TYPE_BPW = {
 NEEDS_IMATRIX = {"iq2_xs", "iq2_xxs", "iq1_s", "iq1_m"}
 
 # named recipes: (expert type, everything-else type)
+# Measured on Qwen3-30B-A3B, requantized from Q4_K_M, against Q4_K_M (RESULTS R17):
+#   experts-q3: mean KLD 0.064, same top token 89.5%, HellaSwag 73% (ref 76%)  -> usable
+#   experts-q2: mean KLD 0.336, same top token 77.1%, HellaSwag 65%             -> too lossy
+# A published 2-bit quant made from BF16 with an importance matrix (unsloth UD-Q2_K_XL) measured
+# KLD 0.127 / 86.2% / 72%: for 2-bit, download one of those instead of requantizing a Q4 file.
+MAX_KLD_OK = 0.15  # above this mean KLD vs the reference, a recipe is not offered by default
+
 RECIPES = {
     "experts-q4": ("q4_k", "q8_0"),
-    "experts-q3": ("q3_k", "q8_0"),
-    "experts-q2": ("q2_k", "q8_0"),     # Pulsar's default streaming recipe
+    "experts-q3": ("q3_k", "q8_0"),     # recommended when the source is already quantized
+    "experts-q2": ("q2_k", "q8_0"),     # Pulsar's streaming recipe; from BF16 + imatrix only
     "experts-q2-small": ("q2_k", "q4_k"),  # smallest RAM footprint for the always-resident part
     "experts-iq2": ("iq2_xxs", "q8_0"),  # needs --imatrix
 }
@@ -95,6 +102,10 @@ def run(src: str, dst: str, experts: str, rest: str, imatrix: str | None = None,
     cmd = command(src, dst, experts, rest, imatrix)
     if "--allow-requantize" in cmd:
         log("note: source is already quantized; requantizing loses more quality than starting from BF16/F16")
+        if TYPE_BPW[experts] < 3 and not imatrix:
+            log("warning: 2-bit experts from an already-quantized file measured far too lossy (KLD 0.34, "
+                "HellaSwag 76% -> 65% on Qwen3-30B-A3B). Use --recipe experts-q3, or a published 2-bit "
+                "quant made from BF16 with an importance matrix (e.g. unsloth UD-Q2_K_XL).")
     log(" ".join(cmd))
     os.makedirs(os.path.dirname(os.path.abspath(dst)), exist_ok=True)
     r = subprocess.run(cmd, capture_output=True, text=True)

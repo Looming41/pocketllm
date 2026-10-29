@@ -176,6 +176,9 @@ CONFIGS = [
     ("slow-drive default + top-k 4 (quality trade-off)",
      {"POCKET_MOE": "1", "POCKET_MOE_NORA": "1", "POCKET_MOE_LAZY_LOAD": "1", "POCKET_MOE_PIN_TRUNK": "1",
       "POCKET_MOE_TOPK": "4"}),                                                                            # 19
+    ("slow-drive default + top-k 6 (near-lossless, R17)",
+     {"POCKET_MOE": "1", "POCKET_MOE_NORA": "1", "POCKET_MOE_LAZY_LOAD": "1", "POCKET_MOE_PIN_TRUNK": "1",
+      "POCKET_MOE_TOPK": "6"}),                                                                            # 20
 ]
 
 

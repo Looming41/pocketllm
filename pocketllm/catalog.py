@@ -22,6 +22,7 @@ BPW = {
     "IQ4_XS": 4.25,
     "MXFP4": 4.25,
     "Q3_K_M": 4.00,
+    "Q3_K": 3.44,     # routed experts only (pocketllm requant)
     "Q2_K": 3.17,
     "IQ2_XXS": 2.06,
     "IQ1_S": 1.56,
@@ -52,7 +53,7 @@ CATALOG = [
         # Routed-expert share solved from 109 = base + E and 17 = base + E/16 -> E ~ 98B.
         "id": "llama-4-scout-17b-16e-instruct", "family": "Meta Llama 4", "params_b": 109, "active_b": 17,
         "n_layer": 48, "kv": 48 * 8 * 256 * 2, "expert_frac": 0.90, "ctx": 10_000_000,
-        "quants": ["Q4_K_M", "Q3_K_M", "Q2_K", "Q2_K+Q8_0", "IQ2_XXS", "IQ1_S"],
+        "quants": ["Q4_K_M", "Q3_K_M", "Q3_K+Q8_0", "Q2_K", "IQ2_XXS", "IQ1_S"],
         "license": "Llama 4 Community License",
         "hf": "unsloth/Llama-4-Scout-17B-16E-Instruct-GGUF", "role": "100B-class target (Meta, MoE)",
     },
@@ -68,7 +69,7 @@ CATALOG = [
         # Less work per token than a 7B dense model: the fanless-laptop pick (non-Meta reference).
         "id": "qwen3-30b-a3b", "family": "Qwen3 MoE", "params_b": 30.5, "active_b": 3.3,
         "n_layer": 48, "kv": 48 * 4 * 256 * 2, "expert_frac": 0.95, "ctx": 32768,
-        "quants": ["Q4_K_M", "Q2_K+Q8_0", "IQ2_XXS"], "license": "Apache 2.0",
+        "quants": ["Q4_K_M", "Q3_K+Q8_0", "Q2_K", "IQ2_XXS"], "license": "Apache 2.0",
         "hf": "unsloth/Qwen3-30B-A3B-GGUF", "role": "30B-class MoE for 16 GB laptops (expert streaming)",
     },
     {
@@ -83,7 +84,7 @@ CATALOG = [
         # Routed-expert share solved from 235 = base + E and 22 = base + E/16 -> E ~ 227B.
         "id": "qwen3-235b-a22b", "family": "Qwen3 MoE", "params_b": 235, "active_b": 22,
         "n_layer": 94, "kv": 94 * 4 * 256 * 2, "expert_frac": 0.966, "ctx": 32768,
-        "quants": ["Q2_K+Q8_0", "IQ2_XXS"], "license": "Apache 2.0",
+        "quants": ["Q3_K+Q8_0", "Q2_K", "IQ2_XXS"], "license": "Apache 2.0",
         "hf": "unsloth/Qwen3-235B-A22B-GGUF", "role": "200B-class reference (64 GB+ machines)",
     },
     {
@@ -102,7 +103,7 @@ def specs(ids=None):
             continue
         for q in e["quants"]:
             if "+" in q:
-                # "Q2_K+Q8_0": routed experts in Q2_K, the rest in Q8_0, made with `pocketllm requant`
+                # "Q3_K+Q8_0": routed experts in Q3_K, the rest in Q8_0, made with `pocketllm requant`
                 eq, rq = q.split("+")
                 s = ModelSpec.estimate(f'{e["id"]}:{q}', e["params_b"], e["active_b"], BPW[rq], e["n_layer"],
                                        e["kv"], e["expert_frac"], e["ctx"], expert_bpw=BPW[eq])

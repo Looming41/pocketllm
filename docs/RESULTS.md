@@ -242,4 +242,34 @@ Fast disk A/B (planner default, no lazy load): stock 3.92, engine 4.68 (×1.19).
 * The slow-drive numbers repeat R15 exactly (0.94 / 1.31).
 * On the requantized model, run 2's v2 + top-k 4 with whole-file read-ahead (3.51) was faster than the slow-drive default + top-k 4 here (2.83). The 11.2 GB model is much closer to fitting the 6 GiB budget than the 18.6 GB one. Where the switch between the two settings belongs, as a function of model size and RAM, is **not established yet**. The planner currently decides by drive speed only.
 
+### R17: what the speed recipes cost in quality (Qwen3-30B-A3B, CI run 40930006772)
+Each variant was compared with the original Q4_K_M file on the same text (`scripts/quality_eval.py`, `docs/results/real_qwen3_30b_quality.json`):
+* **KL divergence** of its next-token distribution from the reference, at every token of 16 × 512 tokens of WikiText-2. This is the most sensitive measure.
+* how often it picks the **same top token** as the reference
+* **perplexity** on the same text
+* **HellaSwag** accuracy on 100 tasks, the same tasks for every variant. With 100 tasks the 95% interval is about ±8 points, so only large gaps mean anything.
+
+| variant | size | PPL | mean KLD | 99% KLD | same top token | HellaSwag |
+|---|---|---|---|---|---|---|
+| reference Q4_K_M | 18.6 GB | 10.09 | – | – | – | 76% |
+| **top-k 6 of 8** | 18.6 GB | 10.24 | **0.060** | 0.53 | 89.0% | 75% |
+| **Q3_K experts + Q8_0 rest** (from Q4) | 14.1 GB | 10.53 | **0.064** | 0.61 | 89.5% | 73% |
+| published UD-Q2_K_XL (unsloth, from BF16 + imatrix) | – | 11.07 | 0.127 | 1.48 | 86.2% | 72% |
+| top-k 4 of 8 | 18.6 GB | 12.11 | 0.299 | 2.54 | 77.0% | 71% |
+| Q2_K experts + Q8_0 rest (from Q4) | 11.2 GB | 12.67 | 0.336 | 3.69 | 77.1% | 65% |
+| Q2_K experts + Q4_K rest (from Q4) | 10.5 GB | 12.63 | 0.340 | 3.80 | 76.6% | 64% |
+| Q2_K experts + Q8_0 rest + top-k 4 | 11.2 GB | 17.96 | 0.748 | 6.27 | 64.8% | 61% |
+
+* **Our 2-bit recipe, made from an already-quantized Q4 file, is too lossy.** Its KLD is 0.34 and HellaSwag drops 76% → 65%. The R9–R16 speed numbers for it are real, but it should not be offered as is. A 2-bit file made properly (unsloth's UD-Q2_K_XL, from BF16 with an importance matrix) loses less than half as much.
+* **Top-k 6 of 8 and Q3_K experts are close to the original** (KLD ≈ 0.06, HellaSwag within the noise).
+* **Top-k 4 of 8 costs noticeably.** It combines badly with 2-bit experts.
+
+**Product changes:**
+1. The UI's "fewer experts" option now means 3/4 of the routed experts (6 of 8), not half.
+2. `pocketllm requant` warns against 2-bit experts from an already-quantized file, and the catalog offers Q3_K experts + Q8_0 instead.
+3. For 2-bit, download a published quant made from BF16 with an importance matrix.
+4. A recipe with mean KLD above 0.15 against its reference is not offered by default.
+
+The speed of these near-lossless variants is measured next.
+
 ## Environment E1: target laptop. **TODO** (run `scripts/check_laptop.sh`, then `docs/TEST_PLAN_BIG_MODEL_KO.md`)

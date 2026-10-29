@@ -354,7 +354,7 @@ def build_args(spec: ModelSpec, p: Plan, b: Budget) -> list:
     # catalog entries are not on disk yet: llama.cpp can fetch them with -hf <repo>:<quant>
     src = ["-hf", spec.path] if spec.source == "estimate" else ["-m", spec.path or spec.name]
     if spec.source == "recipe":
-        p.notes.append("build on the provisioning station: pocketllm requant <bf16/q8 gguf> --experts q2_k --rest q8_0")
+        p.notes.append("build on the provisioning station: pocketllm requant <gguf> --recipe experts-q3")
     args = [*src, "-c", str(p.ctx), "-t", str(b.threads)]
     if p.strategy == "expert_stream" and b.unified:
         # Apple Silicon: until Metal + mmap'd experts larger than RAM is validated on a Mac,
