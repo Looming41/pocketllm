@@ -1,0 +1,16 @@
+bin/linux-x64/llama-perplexity -m /mnt/models/Qwen3-30B-A3B-Q4_K_M.gguf -c 512 --chunks 16 -t 4 -f /mnt/data/wikitext-2-raw/wiki.test.raw --kl-divergence-base /mnt/qwork/reference.kld
+{}
+
+8.53 minutes
+[1]5.9384,[2]8.5127,[3]8.0936,[4]7.7699,[5]7.7899,[6]8.1369,[7]8.2714,[8]8.7244,[9]9.0606,[10]9.5353,[11]9.6487,[12]9.8558,[13]10.3176,[14]9.9454,[15]9.8349,[16]10.0944,
+
+
+0.00.342.224 W load: control-looking token: 128247 '</s>' was not control-type; this is probably a bug in the model. its type will be overridden
+2.24.068.399 I cmn          init: llama threadpool init, n_threads = 4
+2.31.542.924 I 
+2.31.550.043 I system_info: n_threads = 4 (n_threads_batch = 4) / 4 | CPU : SSE3 = 1 | SSSE3 = 1 | AVX = 1 | AVX2 = 1 | F16C = 1 | FMA = 1 | BMI2 = 1 | AVX512 = 1 | AVX512_VBMI = 1 | AVX512_VNNI = 1 | LLAMAFILE = 1 | OPENMP = 1 | REPACK = 1 | 
+2.31.552.952 I perplexity: saving all logits to /mnt/qwork/reference.kld
+2.31.553.656 I perplexity: tokenizing the input ..
+2.33.118.206 I perplexity: tokenization took 1564.54 ms
+2.33.118.469 I perplexity: calculating perplexity over 16 chunks, n_ctx=512, batch_size=2048, n_seq=4
+4.41.235.302 I perplexity: 128.05 seconds per pass - ETA 10.04.035.955 I Final estimate: PPL = 10.0944 +/- 0.49021
