@@ -1,0 +1,8 @@
+experts q3_k, everything else q8_0
+  size      18.55 GB -> ~14.10 GB
+  routed experts 17.55 GB -> ~12.46 GB (streamed per token: 1.10 GB -> ~0.78 GB)
+  everything else 1.00 GB -> ~1.64 GB (stays in RAM)
+note: source is already quantized; requantizing loses more quality than starting from BF16/F16
+bin/linux-x64/llama-quantize --allow-requantize --tensor-type ffn_(gate|up|down|gate_up)_exps=q3_k /mnt/models/Qwen3-30B-A3B-Q4_K_M.gguf /mnt/models/experts-q3.gguf Q8_0
+wrote /mnt/models/experts-q3.gguf: 14.13 GB, 2.12 GB per token
+check quality before use: pocketllm qualify / your eval set

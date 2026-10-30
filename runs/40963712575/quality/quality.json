@@ -1,0 +1,121 @@
+{
+  "reference": "Qwen3-30B-A3B-Q4_K_M.gguf",
+  "ctx": 512,
+  "chunks": 16,
+  "hellaswag_tasks": 100,
+  "variants": [
+    {
+      "label": "reference",
+      "model": "Qwen3-30B-A3B-Q4_K_M.gguf",
+      "env": {},
+      "ppl": 10.1267,
+      "secs": 523.4,
+      "hellaswag": {
+        "tasks": 100,
+        "acc_pct": 76.0,
+        "secs": 874.2
+      }
+    },
+    {
+      "label": "Q3_K experts + Q8_0 rest",
+      "model": "experts-q3.gguf",
+      "env": {},
+      "ppl": 10.530278,
+      "ppl_ref": 10.079784,
+      "ln_ppl_ratio": 0.043723,
+      "kld_mean": 0.064948,
+      "kld_99": 0.659622,
+      "kld_max": 9.246385,
+      "same_top_pct": 89.191,
+      "rms_dp_pct": 8.014,
+      "secs": 371.4,
+      "hellaswag": {
+        "tasks": 100,
+        "acc_pct": 71.0,
+        "secs": 711.5
+      }
+    },
+    {
+      "label": "Q3_K experts + Q8_0 rest, top-k 6",
+      "model": "experts-q3.gguf",
+      "env": {
+        "POCKET_MOE_TOPK": "6"
+      },
+      "ppl": 10.841538,
+      "ppl_ref": 10.079784,
+      "ln_ppl_ratio": 0.072853,
+      "kld_mean": 0.119389,
+      "kld_99": 1.219841,
+      "kld_max": 10.638372,
+      "same_top_pct": 85.172,
+      "rms_dp_pct": 10.371,
+      "secs": 297.5,
+      "hellaswag": {
+        "tasks": 100,
+        "acc_pct": 75.0,
+        "secs": 629.3
+      }
+    },
+    {
+      "label": "published UD-Q2_K_XL (unsloth)",
+      "model": "Qwen3-30B-A3B-UD-Q2_K_XL.gguf",
+      "env": {},
+      "ppl": 11.068441,
+      "ppl_ref": 10.079784,
+      "ln_ppl_ratio": 0.093566,
+      "kld_mean": 0.127974,
+      "kld_99": 1.600297,
+      "kld_max": 8.214103,
+      "same_top_pct": 86.103,
+      "rms_dp_pct": 11.351,
+      "secs": 309.0,
+      "hellaswag": {
+        "tasks": 100,
+        "acc_pct": 72.0,
+        "secs": 581.8
+      }
+    },
+    {
+      "label": "published UD-Q2_K_XL (unsloth), top-k 6",
+      "model": "Qwen3-30B-A3B-UD-Q2_K_XL.gguf",
+      "env": {
+        "POCKET_MOE_TOPK": "6"
+      },
+      "ppl": 11.284872,
+      "ppl_ref": 10.079784,
+      "ln_ppl_ratio": 0.112931,
+      "kld_mean": 0.170743,
+      "kld_99": 1.94098,
+      "kld_max": 9.086404,
+      "same_top_pct": 83.971,
+      "rms_dp_pct": 12.595,
+      "secs": 242.5,
+      "hellaswag": {
+        "tasks": 100,
+        "acc_pct": 69.0,
+        "secs": 501.6
+      }
+    },
+    {
+      "label": "top-k 6",
+      "model": "Qwen3-30B-A3B-Q4_K_M.gguf",
+      "env": {
+        "POCKET_MOE_TOPK": "6"
+      },
+      "ppl": 10.267535,
+      "ppl_ref": 10.079784,
+      "ln_ppl_ratio": 0.018455,
+      "kld_mean": 0.061251,
+      "kld_99": 0.61828,
+      "kld_max": 4.483335,
+      "same_top_pct": 89.167,
+      "rms_dp_pct": 7.406,
+      "secs": 434.8,
+      "hellaswag": {
+        "tasks": 100,
+        "acc_pct": 74.0,
+        "secs": 745.5
+      }
+    }
+  ]
+}
