@@ -26,6 +26,16 @@ With slower drives (100 MB/s each, like cheap flash sticks): stock 0.08 tok/s, a
 
 On fast internal storage (about 2 GB/s), the gain shrinks to noise (×0.98–1.6, R5c). PocketLLM pays off when the weights come from slow drives.
 
+### Bottom line: Qwen3-30B-A3B with 6 GiB of RAM, from 300 MB/s drives (CI lab, R18–R19)
+
+| setting | quality vs original (mean KLD / HellaSwag) | 1 drive | 2 drives |
+|---|---|---|---|
+| stock llama.cpp, original Q4_K_M | – / 76% | 0.08 tok/s | 0.12 tok/s |
+| **PocketLLM, Q3_K experts (default)** | 0.065 / 71–73% (within the ±8-pt noise of 100 tasks) | **1.40 (×17.5)** | **1.96 (×16)** |
+| PocketLLM, Q3_K experts + 6 of 8 experts ("faster") | 0.119 / 75% | 1.67 | 2.35 |
+
+Settings whose loss measured above KLD 0.15 (2-bit experts made from a Q4 file, 4 of 8 experts) are not offered by default (R17).
+
 ### Real model: Qwen3-30B-A3B (18.6 GB) with 6 GiB of RAM, from 300 MB/s drives (CI lab, R12)
 
 | | 1 drive | 2 drives |

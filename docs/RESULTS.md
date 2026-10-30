@@ -286,4 +286,28 @@ Same lab as R12–R16: 6 GiB RAM, 300 MB/s drives, the planner's slow-drive sett
 
 All runs had a standard deviation of 0.00–0.01 tok/s. The best variant with checked quality, **Q3_K experts**, is ×17.5 (1 drive) and ×16 (2 drives) over stock llama.cpp, with KLD 0.064 and HellaSwag 73% against 76%. The quality of the top-k 6 combinations is measured next (`quality.yml`, variant_set=combos).
 
+### R19: quality of the combinations, and the recommended settings (CI run 40963712575)
+Same method as R17, run again with the combinations included:
+
+| variant | PPL | mean KLD | same top token | HellaSwag (100) |
+|---|---|---|---|---|
+| reference Q4_K_M | 10.13 | – | – | 76% |
+| top-k 6 | 10.27 | 0.061 | 89.2% | 74% |
+| Q3_K experts + Q8_0 | 10.53 | 0.065 | 89.2% | 71% |
+| **Q3_K experts + Q8_0, top-k 6** | 10.84 | **0.119** | 85.2% | 75% |
+| unsloth UD-Q2_K_XL | 11.07 | 0.128 | 86.1% | 72% |
+| unsloth UD-Q2_K_XL, top-k 6 | 11.29 | 0.171 | 84.0% | 69% |
+
+Rerunning the same variants changed HellaSwag by 1–2 points (Q3_K 73 → 71, top-k 6 75 → 74). That is within the ±8-point interval of 100 tasks. KLD reproduced to the second decimal.
+
+**Recommended settings for Qwen3-30B-A3B on a slow drive (quality from R17/R19, speed from R18):**
+
+| tier | setting | mean KLD | 1 drive | 2 drives |
+|---|---|---|---|---|
+| near-lossless (KLD ≤ 0.07) | **Q3_K experts + Q8_0 file (default)** | 0.065 | 1.40 tok/s | 1.96 tok/s |
+| acceptable (KLD ≤ 0.15), the user's "faster" choice | Q3_K experts + top-k 6 | 0.119 | 1.67 | 2.35 |
+| not offered by default (KLD > 0.15) | UD-Q2_K_XL + top-k 6, top-k 4, Q2_K from Q4 | 0.17–0.75 | – | – |
+
+Q3_K experts + top-k 6 beats unsloth's UD-Q2_K_XL alone on both quality (0.119 against 0.128) and speed (1.67 against 1.54). Stock llama.cpp on the original file runs at 0.08 / 0.12 tok/s in the same lab.
+
 ## Environment E1: target laptop. **TODO** (run `scripts/check_laptop.sh`, then `docs/TEST_PLAN_BIG_MODEL_KO.md`)
