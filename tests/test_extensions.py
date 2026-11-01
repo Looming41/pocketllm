@@ -370,3 +370,17 @@ class TestStreamingEngineChoice(unittest.TestCase):
         self.assertNotIn("POCKET_MOE_CACHE_MIB", slow.env)
         for p in (fast, unknown):
             self.assertNotIn("POCKET_MOE_LAZY_LOAD", p.env)
+
+
+class TestDashboard(unittest.TestCase):
+    def test_fewer_topk_and_quality_tiers(self):
+        from pocketllm import dashboard
+        self.assertEqual(dashboard.fewer_topk(8), 6)
+        self.assertEqual(dashboard.fewer_topk(4), 3)
+        self.assertIsNone(dashboard.fewer_topk(1))
+        m = gguf.load(TEST_MOE)
+        q = dashboard.quality(m, TEST_MOE)
+        self.assertEqual(q["tier"], "original")
+        self.assertEqual(q["quant"]["experts"], "Q4_K")
+        # tiers measured on Qwen3-30B-A3B are not claimed for other models
+        self.assertIsNone(dashboard.quality(m, TEST_MOE, topk=3)["tier"])

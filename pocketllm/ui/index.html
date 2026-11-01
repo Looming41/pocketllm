@@ -31,6 +31,23 @@ input[type=text],textarea{font:inherit;width:100%;padding:8px;border:1px solid v
 .small{font-size:12px;color:var(--muted)}pre{white-space:pre-wrap;font-size:12px;background:var(--bg);padding:8px;border-radius:6px;max-height:220px;overflow:auto}
 select{font:inherit;padding:4px 6px;border-radius:6px;border:1px solid var(--line);background:var(--bg);color:var(--ink);margin-left:6px}
 label.toggle{display:flex;gap:6px;align-items:center;font-size:12px;color:var(--muted);margin-top:6px}
+.wide{margin:16px 20px 0}
+@media (max-width:900px){.wide{margin:12px 16px 0}}
+.drivehead{display:flex;flex-wrap:wrap;gap:10px;align-items:baseline;justify-content:space-between;margin-bottom:10px}
+.drivesum{font-size:15px;font-weight:600}.drivesum .big{font-size:22px;font-variant-numeric:tabular-nums}
+.drives{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:10px}
+.drive{border:1px solid var(--line);border-radius:8px;padding:10px 12px;background:var(--bg)}
+.drive.gone{opacity:.55;border-style:dashed}
+.drive h3{margin:0 0 4px;font-size:14px;display:flex;gap:6px;align-items:center}
+.dot{width:9px;height:9px;border-radius:50%;background:var(--ok);flex:none}.gone .dot{background:var(--bad)}
+.drive .speed{font-size:18px;font-weight:600;font-variant-numeric:tabular-nums;margin:4px 0}
+.drive ul{margin:4px 0 0;padding-left:16px;font-size:12px;color:var(--muted)}
+.models{display:grid;gap:10px}
+.mcard{border:1px solid var(--line);border-radius:8px;padding:10px 12px;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px 12px;align-items:center}
+.mcard.loaded{border-color:var(--accent)}
+.mcard .name{font-weight:600;overflow-wrap:anywhere}
+.tier{display:inline-block;padding:1px 8px;border-radius:999px;font-size:11px;font-weight:600;background:var(--chip);margin-left:6px}
+.gain{font-variant-numeric:tabular-nums}.gain strong{font-size:16px}
 </style>
 </head>
 <body>
@@ -46,6 +63,20 @@ label.toggle{display:flex;gap:6px;align-items:center;font-size:12px;color:var(--
   </div>
 </header>
 <div class="notice">Prototype. The USB drive carries the software and model files; <strong>all inference runs on this computer's own CPU/GPU and memory</strong>. Speeds marked "≤" are upper-bound estimates; numbers from the benchmark are measured.</div>
+<section class="wide" id="drivesec">
+  <div class="drivehead">
+    <div class="drivesum" id="drivesum">Looking for PocketLLM drives…</div>
+    <button id="remeasure">Measure drive speed again</button>
+  </div>
+  <div class="drives" id="drives"></div>
+  <p class="small">Drives are detected every 2 seconds. Read speed is measured once per drive (256 MB cold read). A model striped over several drives (<code>pocketllm stripe</code>) reads its experts from all of them in parallel.</p>
+</section>
+<section class="wide">
+  <div class="drivehead"><h2 style="margin:0">Pick a model</h2>
+    <label class="toggle" style="margin:0"><input type="checkbox" id="fewerToggle"> fewer experts per token (faster, small quality cost)</label></div>
+  <div class="models" id="models"><p class="small">No model on the drives yet.</p></div>
+  <p class="small">tok/s are planner upper bounds (≤) from the measured drive speeds, not measurements. Quality: KL divergence from the original quantization, measured on Qwen3-30B-A3B (docs/RESULTS.md R17–R19). "near-lossless" ≤ 0.07, "acceptable" ≤ 0.15. Use "A/B" below for a measured speedup on this computer.</p>
+</section>
 <main>
   <div>
     <section><h2>This computer</h2><dl id="hw"><dt>loading</dt><dd>profiling hardware…</dd></dl></section>
@@ -230,6 +261,72 @@ async function ab(){
 $("ask").onclick = ask; $("send").onclick = send; $("tune").onclick = tune; $("ab").onclick = ab;
 $("prompt").addEventListener("keydown", e => { if (e.key === "Enter") send(); });
 refresh(); poll(); setInterval(poll, 2000);
+let seenDrives = {}, lastDriveKey = "", dash = null;
+const TIER = {"original":["unchanged (as published)","ok"], "near-lossless":["near-lossless","ok"], "acceptable":["acceptable","warn"], "not recommended":["not recommended","bad"]};
+function speedText(sp){
+  if (!sp) return "speed: not measured (no model file)";
+  if (sp.measuring) return "measuring…";
+  if (sp.error) return "speed: " + sp.error;
+  return `${sp.mbps} MB/s${sp.cold === false ? " (may be cached)" : ""}`;
+}
+async function pollDrives(){
+  let d; try { d = await api("/api/drives"); } catch(e){ return; }
+  const now = {};
+  d.drives.forEach(x => { now[x.mount] = x; seenDrives[x.mount] = x; });
+  const cards = Object.values(seenDrives).map(x => {
+    const live = now[x.mount], v = live || x;
+    const files = v.files.length ? `<ul>${v.files.map(f => `<li>${esc(f.file)} · ${f.gb} GB</li>`).join("")}</ul>` : '<p class="small">no model files</p>';
+    return `<div class="drive${live ? "" : " gone"}"><h3><span class="dot"></span>${esc(v.name)}${v.main ? ' <span class="small">(app)</span>' : ""}</h3>
+      <div class="small">${live ? "connected" : "UNPLUGGED"} · ${v.usb ? "USB" : v.usb === false ? "internal" : "bus ?"} · ${esc(v.fs || "?")} · ${v.free_gb} / ${v.total_gb} GB free</div>
+      <div class="speed">${live ? esc(speedText(v.speed)) : "–"}</div>${files}
+      ${v.warning ? `<p class="small warn">${esc(v.warning)}</p>` : ""}</div>`;
+  });
+  $("drives").innerHTML = cards.join("");
+  const usb = d.usb_count;
+  $("drivesum").innerHTML = `<span class="big">${d.count}</span> PocketLLM drive${d.count === 1 ? "" : "s"} connected` +
+    (usb ? ` · ${usb} on USB` : "") + (d.total_mbps ? ` · combined read <span class="big">${d.total_mbps}</span> MB/s` : "");
+  const key = d.drives.map(x => x.mount + ":" + ((x.speed || {}).mbps || (x.speed || {}).measuring || "")).join("|");
+  if (key !== lastDriveKey){ lastDriveKey = key; refreshDash(); }
+}
+async function refreshDash(){
+  try { dash = await api("/api/dashboard"); } catch(e){ return; }
+  renderModels();
+}
+function renderModels(){
+  if (!dash) return;
+  const fewer = $("fewerToggle").checked;
+  const missing = (dash.incomplete || []).map(x => `<div class="mcard"><div><div class="name">${esc(x.model)} <span class="tier bad">plug in the other drive(s)</span></div>
+      <div class="small">missing: ${esc(x.missing_parts.join(", "))}</div></div><div></div></div>`).join("");
+  if (!dash.models.length && !missing){ $("models").innerHTML = '<p class="small">No model on the drives yet. Copy a GGUF into PocketLLM/models, or run scripts/make_usb.sh.</p>'; return; }
+  $("models").innerHTML = missing + dash.models.map(m => {
+    const v = fewer && m.fewer ? m.fewer : m;
+    const q = v.quality || {}, t = TIER[q.tier];
+    const tier = t ? `<span class="tier ${t[1]}" title="${esc(q.measured_on || "")}">${t[0]}${q.kld ? " · KLD " + q.kld : ""}</span>` : '<span class="tier">quality not measured</span>';
+    const e1 = (v.estimate || {}).one_drive, eN = (v.estimate || {}).all_drives;
+    let gain = '<span class="small">measuring drive speed…</span>';
+    if (e1){
+      gain = `1 drive (${e1.mbps} MB/s): <strong>≤ ${e1.tok_s ?? "?"}</strong> tok/s`;
+      if (m.n_drives > 1 && eN) gain += ` → ${m.n_drives} drives (${eN.mbps} MB/s): <strong>≤ ${eN.tok_s ?? "?"}</strong> tok/s` + (e1.tok_s && eN.tok_s ? ` (×${(eN.tok_s / e1.tok_s).toFixed(2)})` : "");
+      else if (m.n_drives === 1 && Object.keys(seenDrives).length > 1) gain += ' <span class="small">· on one drive only: stripe it to use the others</span>';
+      if (e1.strategy !== "expert_stream" && e1.strategy !== "disk_paging") gain += ' <span class="small">· fits in memory: the drives only affect load time</span>';
+      else gain += ' <span class="small">· experts streamed from the drives</span>';
+    }
+    const isLoaded = dash.loaded && dash.loaded === m.path;
+    return `<div class="mcard${isLoaded ? " loaded" : ""}">
+      <div><div class="name">${esc(m.name)} <span class="small">${m.size_gb} GB · ${esc(m.file)}${m.moe ? " · MoE" : ""}${fewer && m.fewer ? " · " + m.fewer.topk + " of " + m.n_expert_used + " experts" : ""}</span>${tier}</div>
+      <div class="small">on ${m.n_drives} drive${m.n_drives === 1 ? "" : "s"}: ${esc(m.drives.join(", "))} · ${q.quant?.experts ? "experts " + esc(q.quant.experts) + ", rest " + esc(q.quant.rest || "?") : "dense " + esc(q.quant?.rest || "?")}</div>
+      <div class="gain">${gain}</div></div>
+      <div><button class="primary" data-load="${esc(m.path)}">${isLoaded ? "Reload" : "Load"}</button></div></div>`;
+  }).join("") + (dash.ab ? `<p class="small">Last measured A/B on this computer: PocketLLM ×${dash.ab.speedup ?? "–"} over stock llama.cpp.</p>` : "");
+  document.querySelectorAll("#models button[data-load]").forEach(b => b.onclick = () => {
+    $("experts").value = $("fewerToggle").checked ? "fewer" : "";
+    load(b.dataset.load).then(() => setTimeout(refreshDash, 1500));
+  });
+}
+$("fewerToggle").onchange = renderModels;
+$("remeasure").onclick = async () => { await api("/api/drives/measure", {}); lastDriveKey = ""; };
+pollDrives(); setInterval(pollDrives, 2000);
+
 </script>
 </body>
 </html>

@@ -4,6 +4,9 @@ Endpoints
   GET  /                 UI
   GET  /api/state        hardware summary, local models with plans, catalog recommendations
   GET  /api/status       runtime status: llama-server, RSS, network, drive attached
+  GET  /api/drives       PocketLLM drives plugged in (polled by the UI), read speed measured once each
+  POST /api/drives/measure  measure every drive's read speed again
+  GET  /api/dashboard    local models: parts per drive, quality tier, est. tok/s 1 drive vs all drives
   POST /api/assist       {goal, use_meta} -> constraints (Meta API or offline rules) + ranked plans
   POST /api/load         {path, ctx} -> start llama-server with the planned args (with fallback)
   POST /api/unload
@@ -20,7 +23,7 @@ import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import assistant, core, gguf, planner, runtime, security, thermal, tuner
+from . import assistant, core, dashboard, gguf, planner, runtime, security, thermal, tuner
 
 UI = os.path.join(os.path.dirname(__file__), "ui", "index.html")
 
@@ -122,6 +125,16 @@ def make_handler(st: State):
                              "error": st.integrity.get("error")},
                             "thermal": {"level": th["level"], "suggested": thermal.auto_profile(th)},
                             "drive_read_mbps": io_rate})
+            elif self.path == "/api/drives":
+                rows = dashboard.drive_list()
+                dashboard.measure_speeds(rows)
+                self._json({"drives": rows, "count": len(rows),
+                            "usb_count": sum(1 for d in rows if d["usb"]),
+                            "total_mbps": sum((d.get("speed") or {}).get("mbps") or 0 for d in rows)})
+            elif self.path.startswith("/api/dashboard"):
+                models = dashboard.model_rows(st.get_profile(), dashboard.drive_list())
+                self._json({"models": models, "incomplete": core.INCOMPLETE, "loaded": (st.loaded or {}).get("path"),
+                            "ab": st.ab.get("result")})
             elif self.path == "/api/tune":
                 self._json(st.tune)
             elif self.path == "/api/ab":
@@ -177,7 +190,7 @@ def make_handler(st: State):
                 if b.get("experts") == "fewer" and spec.n_expert_used > 1:
                     # top-k reduction to 3/4 of the routed experts: on Qwen3-30B-A3B, 6 of 8 measured
                     # mean KLD 0.060 and HellaSwag 75% vs 76% (4 of 8: 0.299 and 71%), RESULTS R17
-                    topk = max(1, min(spec.n_expert_used - 1, -(-spec.n_expert_used * 3 // 4)))
+                    topk = dashboard.fewer_topk(spec.n_expert_used)
                 pl = planner.plan(spec, core.budget(prof), ctx=int(b.get("ctx", 4096)), topk=topk)
                 if pl.verdict == "does_not_fit":
                     return self._json({"error": "does not fit", "plan": pl.to_dict()}, 400)
@@ -196,6 +209,9 @@ def make_handler(st: State):
                                  "env": st.llama.env, "power": power, "topk": pl.topk}
                 threading.Thread(target=load, daemon=True).start()
                 self._json({"started": True, "plan": pl.to_dict()})
+            elif self.path == "/api/drives/measure":
+                dashboard.measure_speeds(dashboard.drive_list(), force=True)
+                self._json({"started": True})
             elif self.path == "/api/unload":
                 st.llama.stop()
                 st.loaded = None

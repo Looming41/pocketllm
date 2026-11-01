@@ -26,6 +26,11 @@ PRESETS = {
     "llama4-scout": {"kind": "gguf", "repos": ["unsloth/Llama-4-Scout-17B-16E-Instruct-GGUF"],
                      "patterns": ["*IQ1_S*.gguf", "*IQ2_XXS*.gguf", "*Q2_K*.gguf"]},
     # MLX builds for SwiftLM on Apple Silicon
+    # published 2-bit with an importance matrix (R17: mean KLD 0.128 vs Q4_K_M, "acceptable")
+    "qwen3-30b-a3b-ud-q2": {"kind": "gguf", "repos": ["unsloth/Qwen3-30B-A3B-GGUF"], "patterns": ["*UD-Q2_K_XL*.gguf"]},
+    # small Meta model for a quick check that everything works
+    "llama-3.2-3b": {"kind": "gguf", "repos": ["unsloth/Llama-3.2-3B-Instruct-GGUF", "bartowski/Llama-3.2-3B-Instruct-GGUF"],
+                     "patterns": ["*Q4_K_M*.gguf"]},
     "qwen3-30b-a3b-mlx": {"kind": "mlx", "repos": ["mlx-community/Qwen3-30B-A3B-4bit", "mlx-community/Qwen3-30B-A3B-3bit"]},
 }
 

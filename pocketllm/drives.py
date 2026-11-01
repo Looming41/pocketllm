@@ -61,18 +61,27 @@ def resolve(first_part: str) -> dict:
     same_dir = len({os.path.dirname(p) for p in found.values()}) == 1
     if same_dir:
         return {"path": found[names[0]], "missing": [], "parts": [found[n] for n in names]}
-    link_dir = os.path.join(runtime.data_dir(), "links", stem)
-    os.makedirs(link_dir, exist_ok=True)
-    try:
-        for n in names:
-            link = os.path.join(link_dir, n)
-            if os.path.lexists(link):
-                os.remove(link)
-            os.symlink(found[n], link)
-    except OSError as e:
+    # the links go on the app drive; exFAT/FAT drives (the usual USB format) cannot hold symlinks,
+    # so fall back to this computer's temp folder
+    import tempfile
+    err = None
+    for base in (os.path.join(runtime.data_dir(), "links"), os.path.join(tempfile.gettempdir(), "pocketllm-links")):
+        link_dir = os.path.join(base, stem)
+        try:
+            os.makedirs(link_dir, exist_ok=True)
+            for n in names:
+                link = os.path.join(link_dir, n)
+                if os.path.lexists(link):
+                    os.remove(link)
+                os.symlink(found[n], link)
+            err = None
+            break
+        except OSError as e:
+            err = e
+    if err is not None:
         # Windows needs Developer Mode (or admin) for symlinks
         return {"path": None, "missing": [], "parts": [found[n] for n in names],
-                "error": f"cannot link parts across drives ({e}); on Windows enable Developer Mode, "
+                "error": f"cannot link parts across drives ({err}); on Windows enable Developer Mode, "
                          "or copy all parts into one models folder"}
     return {"path": os.path.join(link_dir, names[0]), "missing": [], "parts": [found[n] for n in names],
             "drives": sorted({os.path.dirname(p) for p in found.values()})}
