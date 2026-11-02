@@ -26,7 +26,17 @@ def local_specs(models_root=None) -> list:
     from . import drives
     specs = []
     INCOMPLETE.clear()
-    for path in gguf.find_models(models_root or runtime.models_dir()):
+    if models_root:
+        found = gguf.find_models(models_root)
+    else:
+        # the first part of a model can sit on any connected PocketLLM drive
+        found, names = [], set()
+        for d in drives.candidate_model_dirs():
+            for p in gguf.find_models(d):
+                if os.path.basename(p) not in names:
+                    names.add(os.path.basename(p))
+                    found.append(p)
+    for path in found:
         r = drives.resolve(path)   # parts may be striped over several USB drives
         if r["path"] is None:
             INCOMPLETE.append({"model": os.path.basename(path), "missing_parts": r["missing"] or [r.get("error", "?")]})

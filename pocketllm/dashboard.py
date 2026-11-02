@@ -76,7 +76,8 @@ def drive_list() -> list:
         st = _storage(mount)
         if mount == main_mount and not files and not st.get("is_usb"):
             continue
-        out.append({"mount": mount, "name": os.path.basename(mount.rstrip("/\\")) or mount,
+        models_dir = model_dirs[0] if model_dirs else os.path.join(_pocket_dirs(root)[0], "models")
+        out.append({"mount": mount, "name": os.path.basename(mount.rstrip("/\\")) or mount, "models_dir": models_dir,
                     "main": mount == main_mount, "usb": st.get("is_usb"), "fs": st.get("fs"),
                     "free_gb": round(free / 1e9, 1), "total_gb": round(total / 1e9, 1),
                     "files": files, "speed": _speed.get(mount), "warning": st.get("warning")})
@@ -89,19 +90,34 @@ def measure_speeds(drive_rows, force=False):
     with _lock:
         for d in drive_rows:
             s = _speed.get(d["mount"])
-            if d["files"] and (force or s is None):
+            if (d["files"] or d.get("models_dir")) and (force or s is None):
                 _speed[d["mount"]] = {"measuring": True}
                 todo.append(d)
 
     def work():
         for d in todo:
-            f = max(d["files"], key=lambda x: x["gb"])["path"]
+            tmp = None
             try:
+                if d["files"]:
+                    f = max(d["files"], key=lambda x: x["gb"])["path"]
+                else:
+                    # no model yet: write a 256 MB scratch file, read it back cold, delete it
+                    os.makedirs(d["models_dir"], exist_ok=True)
+                    tmp = f = os.path.join(d["models_dir"], ".pocketllm-speedtest")
+                    block = os.urandom(8 << 20)
+                    with open(tmp, "wb") as fh:
+                        for _ in range(32):
+                            fh.write(block)
+                        fh.flush()
+                        os.fsync(fh.fileno())
                 r = profiler.measure_read_speed(f, mb=256)
                 res = {"mbps": round(r["gb_per_s"] * 1000) if r.get("gb_per_s") else None,
                        "file": os.path.basename(f), "cold": r.get("cache_evicted"), "at": time.time()}
             except OSError as e:
                 res = {"error": str(e)}
+            finally:
+                if tmp and os.path.exists(tmp):
+                    os.remove(tmp)
             with _lock:
                 _speed[d["mount"]] = res
     if todo:
@@ -192,4 +208,32 @@ def model_rows(profile: dict, drive_rows: list) -> list:
         if k:
             row["fewer"] = {"topk": k, "estimate": estimate(k), "quality": quality(m, spec.path, k)}
         rows.append(row)
+    return rows
+
+
+def meta_catalog(profile: dict, drive_rows: list, local_files: set) -> list:
+    """Meta open-weight models from the catalog that can be downloaded onto the drives, with the
+    planner's verdict for this computer reading from all connected drives at their measured speed."""
+    from . import catalog, core
+    speeds = [(d.get("speed") or {}).get("mbps") for d in drive_rows]
+    bw = sum(s for s in speeds if s) or None
+    free = sum(d["free_gb"] for d in drive_rows)
+    rows = []
+    for e in catalog.CATALOG:
+        if not e["family"].startswith("Meta"):
+            continue
+        quants = []
+        for spec in catalog.specs([e["id"]]):
+            q = spec.name.split(":", 1)[1]
+            if "+" in q:
+                continue  # made with `pocketllm requant`, not downloadable as is
+            pl = planner.plan(spec, core.budget(profile, disk_gbps=bw / 1000 if bw else None))
+            key = e["hf"].split("/")[1].removesuffix("-GGUF").lower()
+            have = any(key in f.lower() and q.lower() in f.lower() for f in local_files)
+            quants.append({"quant": q, "size_gb": round(spec.total_bytes / 1e9, 1), "verdict": pl.verdict,
+                           "strategy": pl.strategy, "tok_s": pl.est_tok_s_upper, "fits_drives": spec.total_bytes / 1e9 < free,
+                           "on_drive": have})
+        rows.append({"id": e["id"], "family": e["family"], "params_b": e["params_b"], "active_b": e["active_b"],
+                     "moe": e["expert_frac"] > 0, "license": e["license"], "role": e["role"], "hf": e["hf"],
+                     "quants": quants})
     return rows

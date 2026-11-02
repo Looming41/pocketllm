@@ -384,3 +384,23 @@ class TestDashboard(unittest.TestCase):
         self.assertEqual(q["quant"]["experts"], "Q4_K")
         # tiers measured on Qwen3-30B-A3B are not claimed for other models
         self.assertIsNone(dashboard.quality(m, TEST_MOE, topk=3)["tier"])
+
+
+class TestDownload(unittest.TestCase):
+    def test_pick_quant_and_split_sets(self):
+        from pocketllm import download
+        files = [{"path": p, "size": 1} for p in (
+            "Llama-3.2-3B-Instruct-Q2_K.gguf", "Llama-3.2-3B-Instruct-Q2_K_L.gguf",
+            "Llama-3.2-3B-Instruct-UD-Q2_K_XL.gguf", "Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+            "Q4_K_M/Scout-Q4_K_M-00001-of-00002.gguf", "Q4_K_M/Scout-Q4_K_M-00002-of-00002.gguf")]
+        self.assertEqual([f["path"] for f in download.pick(files, "Q2_K")], ["Llama-3.2-3B-Instruct-Q2_K.gguf"])
+        self.assertEqual(len(download.pick(files[4:], "Q4_K_M")), 2)
+        self.assertEqual(download.pick(files, "IQ1_S"), [])
+
+    def test_placement_spreads_parts_and_checks_space(self):
+        from pocketllm import download
+        drives_ = [{"models_dir": "/a", "free_gb": 10}, {"models_dir": "/b", "free_gb": 10}]
+        parts = [{"path": f"m-0000{i}-of-00002.gguf", "size": int(4e9)} for i in (1, 2)]
+        self.assertEqual([d for _, d in download.plan_placement(parts, drives_)], ["/a", "/b"])
+        with self.assertRaises(ValueError):
+            download.plan_placement([{"path": "big.gguf", "size": int(30e9)}], drives_)

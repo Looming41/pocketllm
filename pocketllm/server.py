@@ -7,6 +7,9 @@ Endpoints
   GET  /api/drives       PocketLLM drives plugged in (polled by the UI), read speed measured once each
   POST /api/drives/measure  measure every drive's read speed again
   GET  /api/dashboard    local models: parts per drive, quality tier, est. tok/s 1 drive vs all drives
+  GET  /api/catalog      Meta open-weight models that can be downloaded onto the drives, verdict for this computer
+  POST /api/download     {id, quant} -> download onto the connected drives (refused under air-gap or offline)
+  GET  /api/download     download progress
   POST /api/assist       {goal, use_meta} -> constraints (Meta API or offline rules) + ranked plans
   POST /api/load         {path, ctx} -> start llama-server with the planned args (with fallback)
   POST /api/unload
@@ -23,7 +26,7 @@ import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import assistant, core, dashboard, gguf, planner, runtime, security, thermal, tuner
+from . import assistant, core, dashboard, download, gguf, planner, runtime, security, thermal, tuner
 
 UI = os.path.join(os.path.dirname(__file__), "ui", "index.html")
 
@@ -135,6 +138,14 @@ def make_handler(st: State):
                 models = dashboard.model_rows(st.get_profile(), dashboard.drive_list())
                 self._json({"models": models, "incomplete": core.INCOMPLETE, "loaded": (st.loaded or {}).get("path"),
                             "ab": st.ab.get("result")})
+            elif self.path == "/api/catalog":
+                rows = dashboard.drive_list()
+                local = {f["file"] for d in rows for f in d["files"]}
+                self._json({"models": dashboard.meta_catalog(st.get_profile(), rows, local),
+                            "can_download": not st.policy["airgap"] and bool(st.online()),
+                            "airgap": st.policy["airgap"]})
+            elif self.path == "/api/download":
+                self._json(download.state)
             elif self.path == "/api/tune":
                 self._json(st.tune)
             elif self.path == "/api/ab":
@@ -209,6 +220,28 @@ def make_handler(st: State):
                                  "env": st.llama.env, "power": power, "topk": pl.topk}
                 threading.Thread(target=load, daemon=True).start()
                 self._json({"started": True, "plan": pl.to_dict()})
+            elif self.path == "/api/download":
+                b = self._body()
+                if st.policy["airgap"]:
+                    st.audit.write("download_refused", reason="air-gap policy")
+                    return self._json({"error": "air-gap policy: models are added on the provisioning station"}, 403)
+                if not st.online():
+                    return self._json({"error": "this computer is offline"}, 400)
+                from . import catalog
+                entry = catalog.entry(b.get("id", ""))
+                if not entry or not entry["family"].startswith("Meta"):
+                    return self._json({"error": "unknown model"}, 400)
+                rows = dashboard.drive_list()
+                dirs = [d["models_dir"] for d in rows if d.get("models_dir")]
+
+                def done(paths):
+                    return download.stripe_if_useful(paths, dirs, log=download.state["log"].append)
+                try:
+                    r = download.start(entry, b.get("quant", ""), rows, on_done=done)
+                except (OSError, ValueError) as e:
+                    return self._json({"error": str(e)}, 400)
+                st.audit.write("download", model=entry["id"], quant=b.get("quant"))
+                self._json(r, 200 if "error" not in r else 400)
             elif self.path == "/api/drives/measure":
                 dashboard.measure_speeds(dashboard.drive_list(), force=True)
                 self._json({"started": True})

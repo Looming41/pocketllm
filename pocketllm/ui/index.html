@@ -77,6 +77,12 @@ label.toggle{display:flex;gap:6px;align-items:center;font-size:12px;color:var(--
   <div class="models" id="models"><p class="small">No model on the drives yet.</p></div>
   <p class="small">tok/s are planner upper bounds (≤) from the measured drive speeds, not measurements. Quality: KL divergence from the original quantization, measured on Qwen3-30B-A3B (docs/RESULTS.md R17–R19). "near-lossless" ≤ 0.07, "acceptable" ≤ 0.15. Use "A/B" below for a measured speedup on this computer.</p>
 </section>
+<section class="wide">
+  <div class="drivehead"><h2 style="margin:0">Add a Meta model</h2><span class="small" id="dlnote"></span></div>
+  <div class="tablewrap"><table><thead><tr><th>Meta open-weight model</th><th>Quant</th><th class="num">Size</th><th>On this computer, from these drives</th><th class="num">tok/s ≤</th><th>License</th><th></th></tr></thead><tbody id="metaRows"></tbody></table></div>
+  <pre id="dlLog" hidden></pre>
+  <p class="small">Downloads go onto the connected PocketLLM drives; split models are spread over them so they are read in parallel. Only on the provisioning side: an air-gapped drive never downloads. Sizes and speeds are estimates until the file is on the drive.</p>
+</section>
 <main>
   <div>
     <section><h2>This computer</h2><dl id="hw"><dt>loading</dt><dd>profiling hardware…</dd></dl></section>
@@ -326,6 +332,36 @@ function renderModels(){
 $("fewerToggle").onchange = renderModels;
 $("remeasure").onclick = async () => { await api("/api/drives/measure", {}); lastDriveKey = ""; };
 pollDrives(); setInterval(pollDrives, 2000);
+let catalogState = null;
+async function refreshCatalog(){
+  try { catalogState = await api("/api/catalog"); } catch(e){ return; }
+  const c = catalogState;
+  $("dlnote").textContent = c.airgap ? "air-gap policy: downloading is disabled" : c.can_download ? "online: downloads allowed" : "offline: connect to the internet to download";
+  $("metaRows").innerHTML = c.models.map(m => m.quants.map((q, i) => {
+    const [label, cls] = V[q.verdict] || ["?", ""];
+    const where = q.strategy === "expert_stream" ? "experts streamed from the drives" : q.strategy === "disk_paging" ? "paged from the drives" : q.strategy.replace("_", " ");
+    const btn = q.on_drive ? '<span class="small ok">on drive</span>'
+      : `<button data-dl="${esc(m.id)}" data-q="${esc(q.quant)}" ${!c.can_download || !q.fits_drives ? "disabled" : ""} title="${q.fits_drives ? "" : "not enough free space on the drives"}">Download</button>`;
+    return `<tr>${i === 0 ? `<td rowspan="${m.quants.length}"><strong>${esc(m.id)}</strong><br><span class="small">${m.params_b}B${m.moe ? ` · ${m.active_b}B active (MoE)` : ""} · ${esc(m.role)}</span></td>` : ""}
+      <td>${esc(q.quant)}</td><td class="num">${q.size_gb} GB</td><td class="${cls}">${label} · ${esc(where)}</td>
+      <td class="num">${q.tok_s ?? "–"}</td>${i === 0 ? `<td rowspan="${m.quants.length}" class="small">${esc(m.license)}</td>` : ""}<td>${btn}</td></tr>`;
+  }).join("")).join("");
+  document.querySelectorAll("#metaRows button[data-dl]").forEach(b => b.onclick = () => startDownload(b.dataset.dl, b.dataset.q));
+}
+async function startDownload(id, quant){
+  $("dlLog").hidden = false; $("dlLog").textContent = `starting ${id} ${quant}…`;
+  const r = await api("/api/download", {id, quant});
+  if (r.error){ $("dlLog").textContent = r.error; return; }
+  const timer = setInterval(async () => {
+    const d = await api("/api/download");
+    const pct = d.total_bytes ? (100 * d.done_bytes / d.total_bytes).toFixed(1) : "0";
+    const gb = x => (x / 1e9).toFixed(2);
+    $("dlLog").textContent = `${d.model}: ${pct}% (${gb(d.done_bytes)} / ${gb(d.total_bytes)} GB)${d.file ? " · " + d.file : ""}\n` + d.log.join("\n") + (d.error ? "\nERROR: " + d.error : "");
+    if (!d.running){ clearInterval(timer); lastDriveKey = ""; refreshCatalog(); refreshDash(); }
+  }, 1500);
+}
+refreshCatalog(); setInterval(refreshCatalog, 15000);
+
 
 </script>
 </body>
