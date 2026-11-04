@@ -67,6 +67,16 @@ The speedup has two sources. First, stock mmap read-around pulls in neighbouring
 
 ## Quick start
 
+On a Mac with USB drives plugged in, one command does everything (finds the USB drives, installs what is missing, picks the biggest model that fits, puts it on the drives):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Looming41/pocketllm/main/install.sh | bash
+```
+
+Then plug the first drive into any Mac and double-click `PocketLLM/launch.command`.
+
+By hand:
+
 ```bash
 scripts/build_llamacpp.sh             # pinned llama.cpp + PocketLLM engine patch + RPC; Metal/CUDA/Vulkan/CPU auto
 # Windows: powershell -ExecutionPolicy Bypass -File scripts\build_llamacpp.ps1   (or download the CI artifact)

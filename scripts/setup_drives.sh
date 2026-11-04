@@ -83,7 +83,7 @@ TAG=$(cd "$ROOT" && python3 -c 'from pocketllm import runtime; print(runtime.pla
 if [ -x "$ROOT/bin/$TAG/llama-server" ] && grep -q "$(grep -o '[0-9a-f]\{40\}' "$ROOT/scripts/build_llamacpp.sh" | head -1)" "$ROOT/bin/$TAG/VERSION" 2>/dev/null; then
   echo "already built: bin/$TAG"
 else
-  command -v cmake >/dev/null || { echo "cmake is missing: brew install cmake  (or install it from cmake.org)"; exit 1; }
+  command -v cmake >/dev/null || { command -v brew >/dev/null && brew install cmake; } || { echo "cmake is missing: brew install cmake  (or install it from cmake.org)"; exit 1; }
   "$ROOT/scripts/build_llamacpp.sh" auto
 fi
 export POCKETLLM_BIN="$ROOT/bin/$TAG"
