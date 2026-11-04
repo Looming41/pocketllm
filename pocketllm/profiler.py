@@ -11,6 +11,7 @@ import json
 import os
 import platform
 import random
+import re
 import shutil
 import subprocess
 import time
@@ -75,6 +76,27 @@ def cpu_info() -> dict:
     return info
 
 
+def _darwin_available(vm: str, total: int | None) -> int | None:
+    """Memory an app can get on macOS, the way Activity Monitor counts it: total minus
+    "Memory Used" (app memory + wired + compressed). Free pages alone are misleading on a Mac:
+    the file cache fills most of RAM and is handed back as soon as an app needs it."""
+    m = re.search(r"page size of (\d+) bytes", vm)
+    page = int(m.group(1)) if m else (16384 if platform.machine() == "arm64" else 4096)
+    pages = {}
+    for line in vm.splitlines():
+        k, _, v = line.partition(":")
+        v = v.strip().rstrip(".")
+        if v.isdigit():
+            pages[k.strip()] = int(v)
+    if total and "Anonymous pages" in pages and "Pages wired down" in pages:
+        used = (pages["Anonymous pages"] - pages.get("Pages purgeable", 0) + pages["Pages wired down"]
+                + pages.get("Pages occupied by compressor", 0)) * page
+        return max(0, total - used)
+    # older macOS without the anonymous/file-backed split
+    free = sum(pages.get(k, 0) for k in ("Pages free", "Pages inactive", "Pages speculative", "Pages purgeable"))
+    return free * page or None
+
+
 def ram_info() -> dict:
     total = avail = None
     system = platform.system()
@@ -99,13 +121,7 @@ def ram_info() -> dict:
     elif system == "Darwin":
         t = _run(["sysctl", "-n", "hw.memsize"]).strip()
         total = int(t) if t.isdigit() else None
-        vm = _run(["vm_stat"])
-        page = 16384 if platform.machine() == "arm64" else 4096
-        free_pages = 0
-        for line in vm.splitlines():
-            if line.startswith(("Pages free", "Pages inactive", "Pages speculative", "Pages purgeable")):
-                free_pages += int(line.split(":")[1].strip().rstrip("."))
-        avail = free_pages * page if free_pages else None
+        avail = _darwin_available(_run(["vm_stat"]), total)
     elif system == "Windows":
         class MEMSTAT(ctypes.Structure):
             _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),

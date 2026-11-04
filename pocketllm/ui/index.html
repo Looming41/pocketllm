@@ -336,7 +336,8 @@ let catalogState = null;
 async function refreshCatalog(){
   try { catalogState = await api("/api/catalog"); } catch(e){ return; }
   const c = catalogState;
-  $("dlnote").textContent = c.airgap ? "air-gap policy: downloading is disabled" : c.can_download ? "online: downloads allowed" : "offline: connect to the internet to download";
+  $("dlnote").textContent = `judged for ${c.ram_usable_gb} GB of this computer's ${c.ram_total_gb} GB RAM usable now (close other apps to free more) · ` +
+    (c.airgap ? "air-gap policy: downloading is disabled" : c.can_download ? "online: downloads allowed" : "offline: connect to the internet to download");
   $("metaRows").innerHTML = c.models.map(m => m.quants.map((q, i) => {
     const [label, cls] = V[q.verdict] || ["?", ""];
     const where = q.strategy === "expert_stream" ? "experts streamed from the drives" : q.strategy === "disk_paging" ? "paged from the drives" : q.strategy.replace("_", " ");

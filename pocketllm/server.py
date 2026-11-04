@@ -141,7 +141,11 @@ def make_handler(st: State):
             elif self.path == "/api/catalog":
                 rows = dashboard.drive_list()
                 local = {f["file"] for d in rows for f in d["files"]}
-                self._json({"models": dashboard.meta_catalog(st.get_profile(), rows, local),
+                prof = st.get_profile()
+                b = core.budget(prof)
+                self._json({"models": dashboard.meta_catalog(prof, rows, local),
+                            "ram_total_gb": round(((prof.get("ram") or {}).get("total_bytes") or 0) / 1e9, 1),
+                            "ram_usable_gb": round(b.ram_budget / 1e9, 1),
                             "can_download": not st.policy["airgap"] and bool(st.online()),
                             "airgap": st.policy["airgap"]})
             elif self.path == "/api/download":

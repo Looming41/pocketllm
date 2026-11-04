@@ -291,10 +291,13 @@ def plan(spec: ModelSpec, b: Budget, ctx: int = 4096, allow_paging: bool = True,
 def _finish_cpu_side(p: Plan, spec, b: Budget, cpu_bytes, cpu_active, ram_for_weights, allow_paging, kv_cpu=0,
                      gpu_active=0):
     p.ram_bytes = cpu_bytes + kv_cpu
-    if ram_for_weights <= 0:
+    if b.ram_budget - COMPUTE_OVERHEAD - p.kv_bytes <= 0:
         p.strategy, p.verdict = "impossible", "does_not_fit"
         p.notes.append("not enough RAM even for the KV cache and buffers; lower ctx")
         return
+    # unified memory: the GPU share may use up the whole budget; the CPU-side weights are
+    # mmap'd, so they are then simply read from storage (paged) rather than "not fitting"
+    ram_for_weights = max(0, ram_for_weights)
     if cpu_bytes <= ram_for_weights:
         p.verdict = "fits"
         p.est_tok_s_upper, p.bottleneck = _speed(cpu_active, 0, b, gpu_active)
